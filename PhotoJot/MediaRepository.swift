@@ -13,7 +13,7 @@ actor MediaRepository {
         ])
     }
 
-    private func context() -> ModelContext {
+    func context() -> ModelContext {
         let context = ModelContext(container)
         context.autosaveEnabled = false
         context.undoManager = nil
@@ -65,6 +65,7 @@ actor MediaRepository {
                 if entry.lastSeenScanID == run.id && changed { throw IndexFailure.conflictingObservation }
                 if changed {
                     entry.generation = UUID()
+                    entry.clearMetadata()
                     entry.fileSize = file.size; entry.smbCreationTime = file.creation; entry.smbLastWriteTime = file.modified
                 }
                 entry.lastSeenScanID = run.id; entry.lastSeenSequence = run.sequence

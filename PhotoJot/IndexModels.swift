@@ -36,6 +36,28 @@ import SwiftData
     var generation: UUID
     var lastSeenScanID: UUID
     var lastSeenSequence: Int64
+    // Optional追加列により段階2の既存ストアを軽量migrationする。
+    var resolvedInstant: Date?
+    var resolvedFloatingDate: String?
+    var dateSource: String?
+    var dateQuality: String?
+    var dateFallback: Bool?
+    var originalDateValue: String?
+    var utcOffset: String?
+    var subsecond: String?
+    var metadataState: String?
+    var metadataGeneration: UUID?
+    var metadataVersion: Int?
+    var metadataCompletedAt: Date?
+    var metadataDiagnostic: String?
+
+    func clearMetadata() {
+        resolvedInstant = nil; resolvedFloatingDate = nil
+        dateSource = nil; dateQuality = nil; dateFallback = nil
+        originalDateValue = nil; utcOffset = nil; subsecond = nil
+        metadataState = nil; metadataGeneration = nil; metadataVersion = nil
+        metadataCompletedAt = nil; metadataDiagnostic = nil
+    }
 
     init(libraryID: UUID, run: ScanRun, file: ScannedMedia) {
         id = UUID(); self.libraryID = libraryID

@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var scan = ScanController()
+    @State private var metadata = MetadataController()
     @State private var settings = SMBConnectionSettings()
     @State private var password = ""
     @State private var isChecking = false
@@ -47,7 +48,7 @@ struct ContentView: View {
                         .disabled(isChecking)
                     }
                 }
-                .disabled(isChecking || scan.isScanning)
+                .disabled(isChecking || scan.isScanning || metadata.isProcessing)
                 if let message {
                     Section("確認結果") {
                         Label(message, systemImage: succeeded ? "checkmark.circle" : "exclamationmark.circle")
@@ -56,7 +57,7 @@ struct ContentView: View {
                 }
                 Section {
                     Button("保存済みの接続先を走査") { scan.start(access: coordinator) }
-                        .disabled(isChecking || scan.isScanning)
+                        .disabled(isChecking || scan.isScanning || metadata.isProcessing)
                     if scan.isScanning {
                         ProgressView("走査中")
                         Button("中断", role: .cancel) { scan.cancel() }
@@ -73,13 +74,31 @@ struct ContentView: View {
                 } footer: {
                     Text("最後に接続確認で保存した共有・ルートを走査します。画面の未保存の変更は使用しません。")
                 }
+                Section {
+                    Button("撮影日時を解析") { metadata.start(access: coordinator) }
+                        .disabled(isChecking || scan.isScanning || metadata.isProcessing)
+                    if metadata.isProcessing {
+                        ProgressView("解析中")
+                        Button("解析を中断", role: .cancel) { metadata.cancel() }
+                    }
+                    if let status = metadata.status {
+                        Text(status)
+                        Text("処理済み：\(metadata.progress.completed) / \(metadata.progress.total)件")
+                        Text("今回の解析で日時不明：\(metadata.progress.unknown)件")
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("撮影日時")
+                } footer: {
+                    Text("保存済みの接続先のindexを使用します。未処理・更新されたメディアを解析し、取得できない場合はファイルの日時を使用します。")
+                }
             }
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .navigationTitle("PhotoJot")
             .onAppear(perform: loadSettings)
             .onChange(of: scenePhase) { _, phase in
-                if phase == .background { scan.cancel() }
+                if phase == .background { scan.cancel(); metadata.cancel() }
             }
             .onChange(of: settings) { old, new in
                 message = nil

@@ -98,6 +98,79 @@ actor SMBAccessCoordinator {
         return progress
     }
 
+    // scanと同じ排他フラグで、処理全体を一つのsessionに限定する。
+    func completeMetadata(settings: SMBConnectionSettings, password: String,
+                          next: @Sendable () async throws -> [MetadataTarget],
+                          save: @Sendable ([MetadataUpdate]) async throws -> Void) async throws {
+        guard !isChecking, (1...65535).contains(settings.port) else {
+            throw AccessError(message: "ほかのSMB処理が終了するまでお待ちください。")
+        }
+        isChecking = true
+        defer { isChecking = false }
+        let client = SMBClient(host: settings.host, port: settings.port)
+        defer { client.session.disconnect() }
+        var stage = "接続"
+        do {
+            try Task.checkCancellation()
+            try await client.session.connect()
+            stage = "認証"
+            try await client.login(username: settings.username, password: password,
+                                   domain: settings.domain.isEmpty ? nil : settings.domain)
+            stage = "共有への接続"
+            try Task.checkCancellation()
+            try await client.connectShare(settings.share)
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw Self.failure(error, stage: stage) }
+        while true {
+            try Task.checkCancellation()
+            let targets = try await next()
+            if targets.isEmpty { return }
+            var updates: [MetadataUpdate] = []
+            for target in targets {
+                try Task.checkCancellation()
+                let outcome = try await readMetadata(client: client, target: target)
+                updates.append(MetadataUpdate(target: target, outcome: outcome))
+                if outcome.requiresRetry {
+                    try await save(updates)
+                    throw MetadataServiceError.interruptedRead
+                }
+            }
+            try await save(updates)
+        }
+    }
+
+    private func readMetadata(client: SMBClient, target: MetadataTarget) async throws -> MetadataOutcome {
+        guard let format = MediaDateFormat(name: target.file.path), target.file.size >= 0 else { throw IndexFailure.invalidState }
+        // indexはshare基準。rootを再付加したりpathの表現を変えたりしない。
+        let file = client.fileReader(path: target.file.path)
+        var outcome: MetadataOutcome
+        do {
+            let size = try await file.fileSize
+            if size != UInt64(target.file.size) {
+                outcome = MetadataCore.outcome(format: format,
+                    evidence: .init(diagnostics: [.init(kind: .temporary, message: "index取得後にサイズが変化。再走査が必要")]),
+                    creation: nil, modified: nil)
+            } else {
+                let input = SMBMetadataSource(reader: file, size: size, isJPEG: format == .jpeg)
+                outcome = try await MetadataCore.parse(format: format, source: input,
+                                                       creation: target.file.creation, modified: target.file.modified)
+            }
+        } catch is CancellationError {
+            try? await file.close()
+            throw CancellationError()
+        } catch {
+            outcome = MetadataCore.outcome(format: format,
+                evidence: .init(diagnostics: [.init(kind: .smb, message: "SMB open/read失敗")]), creation: nil, modified: nil)
+        }
+        do { try await file.close() }
+        catch {
+            outcome = MetadataCore.outcome(format: format,
+                evidence: .init(diagnostics: [.init(kind: .cleanup, message: "SMB close失敗")]), creation: nil, modified: nil)
+        }
+        try Task.checkCancellation()
+        return outcome
+    }
+
     private nonisolated static func failure(_ error: Error, stage: String) -> AccessError {
         if let response = error as? ErrorResponse {
             let code = response.header.status
