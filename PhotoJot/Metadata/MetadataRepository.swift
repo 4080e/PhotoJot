@@ -84,6 +84,7 @@ extension MediaRepository {
                   entry.generation == target.generation, entry.pathKey == target.file.pathKey else {
                 throw MetadataServiceError.staleIndex
             }
+            defer { TimelineDates.apply(to: entry) }
             entry.clearMetadata()
             let outcome = update.outcome, result = outcome.resolution
             entry.metadataState = outcome.state
@@ -100,6 +101,9 @@ extension MediaRepository {
             entry.originalDateValue = result.originalValue; entry.utcOffset = result.utcOffset; entry.subsecond = result.subsecond
             entry.metadataGeneration = target.generation; entry.metadataVersion = version
             entry.metadataCompletedAt = Date()
+        }
+        for libraryID in Set(updates.map { $0.target.libraryID }) {
+            try advanceTimelineRevision(libraryID, context: context)
         }
         try Task.checkCancellation()
         try context.save()

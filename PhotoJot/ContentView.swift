@@ -4,6 +4,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var scan = ScanController()
     @State private var metadata = MetadataController()
+    @State private var timelineDiagnostics = TimelineDiagnosticsController()
     @State private var settings = SMBConnectionSettings()
     @State private var password = ""
     @State private var isChecking = false
@@ -48,7 +49,7 @@ struct ContentView: View {
                         .disabled(isChecking)
                     }
                 }
-                .disabled(isChecking || scan.isScanning || metadata.isProcessing)
+                .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
                 if let message {
                     Section("確認結果") {
                         Label(message, systemImage: succeeded ? "checkmark.circle" : "exclamationmark.circle")
@@ -57,7 +58,7 @@ struct ContentView: View {
                 }
                 Section {
                     Button("保存済みの接続先を走査") { scan.start(access: coordinator) }
-                        .disabled(isChecking || scan.isScanning || metadata.isProcessing)
+                        .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
                     if scan.isScanning {
                         ProgressView("走査中")
                         Button("中断", role: .cancel) { scan.cancel() }
@@ -76,7 +77,7 @@ struct ContentView: View {
                 }
                 Section {
                     Button("撮影日時を解析") { metadata.start(access: coordinator) }
-                        .disabled(isChecking || scan.isScanning || metadata.isProcessing)
+                        .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
                     if metadata.isProcessing {
                         ProgressView("解析中")
                         Button("解析を中断", role: .cancel) { metadata.cancel() }
@@ -92,13 +93,41 @@ struct ContentView: View {
                 } footer: {
                     Text("保存済みの接続先のindexを使用します。未処理・更新されたメディアを解析し、取得できない場合はファイルの日時を使用します。")
                 }
+                Section {
+                    Button("timeline診断（ローカルのみ）") { timelineDiagnostics.start() }
+                        .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
+                    if timelineDiagnostics.isRunning {
+                        ProgressView("日付キー構築・集計中")
+                        Button("診断を中断", role: .cancel) { timelineDiagnostics.cancel() }
+                    }
+                    if let status = timelineDiagnostics.status { Text(status) }
+                    if let result = timelineDiagnostics.result {
+                        LabeledContent("timeline対象", value: "\(result.total)")
+                        LabeledContent("内部撮影日時", value: "\(result.kinds[.internalMetadata, default: 0])")
+                        LabeledContent("コンテナ日時", value: "\(result.kinds[.containerDate, default: 0])")
+                        LabeledContent("確定fallback", value: "\(result.kinds[.confirmedFallback, default: 0])")
+                        LabeledContent("暫定日時", value: "\(result.kinds[.provisional, default: 0])")
+                        LabeledContent("日時不明", value: "\(result.kinds[.unknown, default: 0])")
+                        LabeledContent("記録offsetあり", value: "\(result.withOffset)")
+                        LabeledContent("記録offsetなし", value: "\(result.withoutOffset)")
+                        ForEach(result.offsets.keys.sorted(), id: \.self) { offset in
+                            LabeledContent(offset, value: "\(result.offsets[offset, default: 0])")
+                        }
+                        LabeledContent("metadata未処理（診断前 → 後）",
+                                       value: "\(result.pendingMetadataBefore) → \(result.pendingMetadataAfter)")
+                    }
+                } header: {
+                    Text("timeline基盤の診断（開発用）")
+                } footer: {
+                    Text("保存済み設定のindexだけを使用します。missingは対象外。SMB・mvhdのUTC表現は撮影地offsetに数えず、日時不明もoffsetなしに含みます。")
+                }
             }
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .navigationTitle("PhotoJot")
             .onAppear(perform: loadSettings)
             .onChange(of: scenePhase) { _, phase in
-                if phase == .background { scan.cancel(); metadata.cancel() }
+                if phase == .background { scan.cancel(); metadata.cancel(); timelineDiagnostics.cancel() }
             }
             .onChange(of: settings) { old, new in
                 message = nil

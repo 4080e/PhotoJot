@@ -12,6 +12,9 @@ import SwiftData
     var updatedAt: Date
     var nextScanSequence: Int64
     var completedScanSequence: Int64
+    // cursorの継続中にindexが更新されたことを検知する。
+    var timelineRevision: Int64?
+    var timelinePreparedVersion: Int?
 
     init(scopeKey: String, connectionData: Data, displayName: String) {
         id = UUID(); self.scopeKey = scopeKey; self.connectionData = connectionData
@@ -22,7 +25,8 @@ import SwiftData
 
 @Model nonisolated final class MediaEntry {
     #Unique<MediaEntry>([\.libraryID, \.pathKey])
-    #Index<MediaEntry>([\.libraryID, \.lastSeenSequence])
+    #Index<MediaEntry>([\.libraryID, \.lastSeenSequence],
+                       [\.libraryID, \.timelineKeyVersion, \.timelineSortKey])
     var id: UUID
     // Library.idによる関連。モデルをactor間で渡さない。
     var libraryID: UUID
@@ -51,7 +55,12 @@ import SwiftData
     var metadataCompletedAt: Date?
     var metadataDiagnostic: String?
 
+    // 検索用の派生値だけを保存。source / quality / groupは既存metadataから算出する。
+    var timelineSortKey: String = ""
+    var timelineKeyVersion: Int?
+
     func clearMetadata() {
+        timelineSortKey = ""; timelineKeyVersion = nil
         resolvedInstant = nil; resolvedFloatingDate = nil
         dateSource = nil; dateQuality = nil; dateFallback = nil
         originalDateValue = nil; utcOffset = nil; subsecond = nil

@@ -69,11 +69,16 @@ actor MediaRepository {
                     entry.fileSize = file.size; entry.smbCreationTime = file.creation; entry.smbLastWriteTime = file.modified
                 }
                 entry.lastSeenScanID = run.id; entry.lastSeenSequence = run.sequence
+                if changed || entry.timelineKeyVersion != TimelinePolicy.version || entry.timelineSortKey.isEmpty {
+                    TimelineDates.apply(to: entry)
+                }
             } else {
                 let entry = MediaEntry(libraryID: libraryID, run: run, file: file)
+                TimelineDates.apply(to: entry)
                 context.insert(entry); byKey[file.pathKey] = entry
             }
         }
+        try advanceTimelineRevision(libraryID, context: context)
         run.files = progress.files; run.folders = progress.folders; run.media = progress.media
         try Task.checkCancellation()
         try context.save()
@@ -97,6 +102,7 @@ actor MediaRepository {
             try Task.checkCancellation()
             // 完了runと公開sequenceを同じsaveで確定する。物理削除・全件更新は不要。
             library.completedScanSequence = sequence
+            library.timelineRevision = (library.timelineRevision ?? 0) + 1
         }
         run.state = completed ? "completed" : (Task.isCancelled ? "cancelled" : "failed")
         run.endedAt = Date(); run.missingCount = missing

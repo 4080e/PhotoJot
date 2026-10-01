@@ -12,5 +12,6 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   PhotoJot/Metadata/LimitedExifParser.swift PhotoJot/Metadata/LimitedHEIFParser.swift \
   PhotoJot/Metadata/LimitedVideoParser.swift PhotoJot/Metadata/DisplayDateResolver.swift \
   PhotoJot/Metadata/MetadataCore.swift PhotoJot/Metadata/MetadataRepository.swift \
+  PhotoJot/Timeline/TimelineDate.swift PhotoJot/Timeline/TimelineRepository.swift \
   Tests/MetadataStoreChecks.swift -o "$check_dir/checks"
 "$check_dir/checks" "$check_dir/index.store"
