@@ -2,7 +2,7 @@ import Foundation
 import Network
 import SMBClient
 
-// この段階では接続確認を1件ずつ実行し、毎回必ず切断する。
+// 接続確認と走査は排他的に実行し、成功・失敗ともにセッションを切断する。
 actor SMBAccessCoordinator {
     private var isChecking = false
 
@@ -37,6 +37,65 @@ actor SMBAccessCoordinator {
         } catch {
             throw Self.failure(error, stage: stage)
         }
+    }
+
+    func scan(settings: SMBConnectionSettings, password: String,
+              consume: @Sendable ([ScannedMedia], ScanProgress) async throws -> Void) async throws -> ScanProgress {
+        guard !isChecking, (1...65535).contains(settings.port) else {
+            throw AccessError(message: "SMB処理を開始できません。接続確認の終了を待ってください。")
+        }
+        isChecking = true
+        defer { isChecking = false }
+        let client = SMBClient(host: settings.host, port: settings.port)
+        defer { client.session.disconnect() }
+        var stage = "接続"
+        do {
+            try Task.checkCancellation()
+            try await client.session.connect()
+            stage = "認証"
+            try Task.checkCancellation()
+            try await client.login(username: settings.username, password: password,
+                                   domain: settings.domain.isEmpty ? nil : settings.domain)
+            stage = "共有への接続"
+            try Task.checkCancellation()
+            try await client.connectShare(settings.share)
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw Self.failure(error, stage: stage) }
+
+        var pending = [settings.rootPath]
+        var batch: [ScannedMedia] = []
+        var progress = ScanProgress()
+        while let directory = pending.popLast() {
+            try Task.checkCancellation()
+            let entries: [File]
+            do { entries = try await client.listDirectory(path: directory) }
+            catch { throw Self.failure(error, stage: "フォルダの一覧取得") }
+            progress.folders += 1
+            for entry in entries where entry.name != "." && entry.name != ".." {
+                try Task.checkCancellation()
+                let path = directory.isEmpty ? entry.name : directory + "/" + entry.name
+                if entry.isDirectory {
+                    pending.append(path)
+                } else {
+                    progress.files += 1
+                    if ScannedMedia.isSupported(entry.name) {
+                        guard let size = Int64(exactly: entry.size) else { throw IndexFailure.invalidState }
+                        progress.media += 1
+                        batch.append(ScannedMedia(path: path, size: size,
+                                                  creation: entry.creationTime, modified: entry.lastWriteTime))
+                        if batch.count == MediaRepository.batchSize {
+                            try await consume(batch, progress)
+                            batch.removeAll(keepingCapacity: true)
+                        }
+                    }
+                }
+            }
+            // 対象メディアのないフォルダでも進捗とキャンセルを反映する。
+            try await consume([], progress)
+        }
+        try Task.checkCancellation()
+        if !batch.isEmpty { try await consume(batch, progress) }
+        return progress
     }
 
     private nonisolated static func failure(_ error: Error, stage: String) -> AccessError {

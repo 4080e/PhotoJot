@@ -1,6 +1,6 @@
 import Foundation
 
-struct SMBConnectionSettings: Codable, Equatable, Sendable {
+nonisolated struct SMBConnectionSettings: Codable, Equatable, Sendable {
     var host = ""
     var port = 445
     var username = ""
@@ -37,7 +37,7 @@ struct SMBConnectionSettings: Codable, Equatable, Sendable {
     }
 }
 
-private enum SettingsError: LocalizedError {
+private nonisolated enum SettingsError: LocalizedError {
     case invalidConnection, invalidPath
 
     var errorDescription: String? {
