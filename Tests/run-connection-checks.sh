@@ -8,6 +8,6 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   PhotoJot/Metadata/LimitedExifParser.swift PhotoJot/Metadata/LimitedHEIFParser.swift \
   PhotoJot/Metadata/LimitedVideoParser.swift PhotoJot/Metadata/DisplayDateResolver.swift \
   PhotoJot/Metadata/MetadataCore.swift PhotoJot/Metadata/MetadataRepository.swift \
-  PhotoJot/Timeline/TimelineDate.swift PhotoJot/Timeline/TimelineRepository.swift \
+  PhotoJot/Timeline/TimelineDate.swift PhotoJot/Timeline/TimelineRepository.swift PhotoJot/Timeline/TimelineController.swift \
   PhotoJot/Metadata/MetadataProgress.swift PhotoJot/Update/UpdateCheckpoint.swift PhotoJot/Update/LibraryUpdateController.swift PhotoJot/Settings/ConnectionSettingsController.swift Tests/ConnectionFlowChecks.swift -o "$check_dir/checks"
 "$check_dir/checks" "$check_dir/index.store"

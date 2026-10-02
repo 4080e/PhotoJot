@@ -22,6 +22,8 @@ nonisolated struct LibraryUpdateConnection: Sendable {
     private(set) var restartRequested = false
     var isRunning: Bool { state == .running || state == .cancelling }
     private(set) var isCheckingConnection = false
+    private(set) var isEditingSettings = false
+    @ObservationIgnored private var deferredUpdateRequested = false
     @ObservationIgnored private var connectionConfigured = true
 
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -50,7 +52,12 @@ nonisolated struct LibraryUpdateConnection: Sendable {
     }
 
     func requestUpdate() {
-        guard connectionConfigured, !isCheckingConnection, lastScenePhase != .background else { return }
+        guard connectionConfigured, lastScenePhase != .background else { return }
+        if isEditingSettings || isCheckingConnection {
+            deferredUpdateRequested = true
+            return
+        }
+        deferredUpdateRequested = false
         if task != nil {
             if state == .cancelling { restartRequested = true }
             return
@@ -94,6 +101,7 @@ nonisolated struct LibraryUpdateConnection: Sendable {
 
     func cancel() {
         restartRequested = false
+        deferredUpdateRequested = false
         guard task != nil else { return }
         state = .cancelling
         task?.cancel()
@@ -101,10 +109,23 @@ nonisolated struct LibraryUpdateConnection: Sendable {
 
     func setConnectionConfigured(_ configured: Bool) { connectionConfigured = configured }
 
+    func beginSettingsEditing() {
+        isEditingSettings = true
+        // 中断終了待ち中に開いた場合も、旧設定による再開をsheet内で始めない。
+        if restartRequested { deferredUpdateRequested = true; restartRequested = false }
+    }
+
+    func endSettingsEditing() {
+        isEditingSettings = false
+        if deferredUpdateRequested { requestUpdate() }
+    }
+
     // 保存操作中だけ更新開始を抑止。古い接続設定のTaskが終了してから接続確認する。
     func beginConnectionCheck() async {
         isCheckingConnection = true
+        let shouldResume = isRunning || deferredUpdateRequested
         cancel()
+        if shouldResume { deferredUpdateRequested = true }
         await task?.value
     }
 

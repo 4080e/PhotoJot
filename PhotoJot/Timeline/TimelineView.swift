@@ -3,7 +3,9 @@ import SwiftUI
 struct TimelineView: View {
     @State private var model: TimelineController
     let update: LibraryUpdateController
+    #if DEBUG
     @State private var selectedItem: TimelineItem?
+    #endif
     private let columns = [GridItem(.adaptive(minimum: 88), spacing: 8)]
 
     init(repository: TimelineRepository, settings: SMBConnectionSettings, update: LibraryUpdateController) {
@@ -26,8 +28,9 @@ struct TimelineView: View {
                             .disabled(model.isLoading)
                     }
                 } else {
-                    ContentUnavailableView("表示するメディアがありません", systemImage: "photo.on.rectangle",
-                                           description: Text(update.isRunning ? "ライブラリを読み込み中です。" : model.emptyMessage))
+                    ContentUnavailableView("保存済みの写真・動画はまだありません", systemImage: "photo.on.rectangle",
+                                           description: Text(update.isRunning ? "ライブラリを読み込み中です。" :
+                                                (update.state == .failed ? "更新できませんでした。接続を確認して、右上の更新ボタンから再試行してください。" : model.emptyMessage)))
                 }
             } else {
                 ScrollView {
@@ -35,7 +38,12 @@ struct TimelineView: View {
                         ForEach(model.blocks) { block in
                             Section {
                                 ForEach(block.items) { item in
-                                    TimelinePlaceholder(item: item) { selectedItem = item }
+                                    TimelinePlaceholder(item: item)
+                                        #if DEBUG
+                                        .contextMenu {
+                                            Button("開発用情報") { selectedItem = item }
+                                        }
+                                        #endif
                                         .task { await model.loadMoreIfNeeded(visibleID: item.id) }
                                 }
                             } header: {
@@ -56,6 +64,12 @@ struct TimelineView: View {
         }
         .navigationTitle("timeline")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("今すぐ更新", systemImage: "arrow.clockwise") { update.requestUpdate() }
+                    .disabled(update.isCheckingConnection || update.isEditingSettings)
+            }
+        }
         .task { await model.loadInitial() }
         .onChange(of: update.phase) { _, phase in
             if phase == .metadata { Task { await model.reloadIfEmpty() } }
@@ -70,19 +84,21 @@ struct TimelineView: View {
                 HStack {
                     ProgressView()
                     Text(update.state == .cancelling ? "更新を中断中…" :
-                        (update.phase == .metadata ? "撮影日時を更新中（\(update.metadataProgress.completed) / \(update.metadataProgress.total)）" : "ライブラリを更新中…"))
+                        (update.phase == .metadata ? "撮影日時を更新中…" : "ライブラリを更新中…"))
                         .font(.footnote)
                     Spacer()
                 }.padding().background(.bar)
-            } else if let error = update.errorMessage {
+            } else if update.state == .failed {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("更新できませんでした。保存済みの内容を表示します。")
-                    Text(error).foregroundStyle(.secondary).lineLimit(2)
-                    Button("再試行") { update.requestUpdate() }.disabled(update.isCheckingConnection)
+                    Text(model.blocks.isEmpty ? "ライブラリを更新できませんでした。" : "更新できませんでした。保存済みの内容を表示しています。")
+                    Text("右上の更新ボタンで再試行するか、接続設定を確認してください。")
+                        .foregroundStyle(.secondary)
                 }.font(.footnote).frame(maxWidth: .infinity, alignment: .leading).padding().background(.bar)
             }
         }
-        .sheet(item: $selectedItem) { item in TimelineItemDetails(item: item) }
+        #if DEBUG
+        .sheet(item: $selectedItem) { item in DeveloperMediaDetailsView(item: item) }
+        #endif
     }
 
     @ViewBuilder private var footer: some View {
@@ -106,45 +122,16 @@ struct TimelineView: View {
 // thumbnail導入時はこのセル内容を置換する。今回は画像取得処理を持たない。
 private struct TimelinePlaceholder: View {
     let item: TimelineItem
-    let action: () -> Void
     private var isVideo: Bool { item.mediaType == "video" }
     var body: some View {
-        Button(action: action) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                Image(systemName: isVideo ? "video.fill" : "photo")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-            }
-            .aspectRatio(1, contentMode: .fit)
-            .contentShape(Rectangle())
+        ZStack {
+            RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+            Image(systemName: isVideo ? "video.fill" : "photo")
+                .font(.title2)
+                .foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain)
+        .aspectRatio(1, contentMode: .fit)
+        .contentShape(Rectangle())
         .accessibilityLabel(isVideo ? "動画" : "写真")
-        .accessibilityHint("タップして開発用情報を表示")
-    }
-}
-
-private struct TimelineItemDetails: View {
-    @Environment(\.dismiss) private var dismiss
-    let item: TimelineItem
-    var body: some View {
-        NavigationStack {
-            Form {
-                LabeledContent("ファイル", value: (item.relativePath as NSString).lastPathComponent)
-                LabeledContent("種類", value: item.mediaType == "video" ? "動画" : "写真")
-                LabeledContent("暦日時", value: item.date.calendarDateTime ?? "日時不明")
-                LabeledContent("記録offset", value: item.date.recordedOffset ?? "なし")
-                LabeledContent("分類", value: item.date.kind.rawValue)
-                LabeledContent("source", value: item.date.source ?? "なし")
-                LabeledContent("quality", value: item.date.quality ?? "なし")
-                LabeledContent("metadata状態", value: item.metadataState ?? "未処理")
-                LabeledContent("現generationの解析完了", value: item.metadataIsCurrent ? "はい" : "いいえ")
-                Section("共有からの相対パス") { Text(item.relativePath) }
-            }
-            .navigationTitle("開発用情報")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("閉じる") { dismiss() } } }
-        }
     }
 }

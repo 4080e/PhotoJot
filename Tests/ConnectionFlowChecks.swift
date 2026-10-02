@@ -5,6 +5,8 @@ import Foundation
     var events: [String] = []
     var failCheck = false
     var failSave = false
+    var failUpdate = false
+    var failReadPassword = false
     var checkGate: CheckedContinuation<Void, Never>?
     var pauseCheck = false
     var scanGate: CheckedContinuation<Void, Never>?
@@ -13,6 +15,7 @@ import Foundation
     enum Failure: Error { case expected }
     lazy var update = LibraryUpdateController(connection: {
         self.events.append("update")
+        if self.failUpdate { throw Failure.expected }
         let data = self.defaults.data(forKey: SMBConnectionSettings.storageKey)!
         return LibraryUpdateConnection(settings: try JSONDecoder().decode(SMBConnectionSettings.self, from: data), password: self.secret ?? "")
     }, scan: { connection, _ in
@@ -24,7 +27,10 @@ import Foundation
     init() { defaults = UserDefaults(suiteName: "PhotoJot.ConnectionChecks.\(UUID())")! }
     func controller() -> ConnectionSettingsController {
         ConnectionSettingsController(defaults: defaults, update: update,
-            readPassword: { _ in self.secret },
+            readPassword: { _ in
+                if self.failReadPassword { throw Failure.expected }
+                return self.secret
+            },
             savePassword: { _, value in
                 self.events.append("save")
                 if self.failSave { throw Failure.expected }
@@ -97,6 +103,94 @@ import Foundation
         changing.draft.share = "failed"
         let rejected = await changing.save()
         precondition(!rejected && changing.savedSettings?.share == "other" && changing.draft.share == "failed")
+        // sheetの表示だけでは実行中の更新を止めない。backgroundで止め、activeは閉じるまで保留。
+        fixture.failCheck = false
+        precondition(changing.beginEditing())
+        precondition(!changing.beginEditing()) // 同じdraftの同時編集は開始しない。
+        changing.draft.share = "unsaved"
+        let beforeEditing = fixture.events.count
+        fixture.update.scenePhaseChanged(.background)
+        fixture.update.scenePhaseChanged(.active)
+        fixture.update.scenePhaseChanged(.active)
+        precondition(!fixture.update.isRunning && fixture.events.count == beforeEditing)
+        changing.endEditing()
+        await wait { !fixture.update.isRunning }
+        precondition(changing.savedSettings?.share == "other")
+        precondition(fixture.events.suffix(3) == ["update", "scan:other", "metadata"])
+
+        fixture.pauseScan = true
+        fixture.update.requestUpdate()
+        await wait { fixture.scanGate != nil }
+        precondition(changing.beginEditing())
+        precondition(fixture.update.state == .running)
+        fixture.update.scenePhaseChanged(.background)
+        fixture.update.scenePhaseChanged(.active)
+        precondition(fixture.update.state == .cancelling && !fixture.update.restartRequested)
+        let duringDrain = fixture.events.count
+        changing.endEditing() // 中断終了前に閉じる場合は既存のrestart予約を使用。
+        precondition(fixture.update.restartRequested && fixture.events.count == duringDrain)
+        fixture.pauseScan = false
+        fixture.scanGate?.resume(); fixture.scanGate = nil
+        await wait { !fixture.update.isRunning }
+        precondition(fixture.events.suffix(3) == ["update", "scan:other", "metadata"])
+
+        precondition(changing.beginEditing())
+        changing.draft.share = "new-saved"
+        fixture.update.scenePhaseChanged(.background)
+        fixture.update.scenePhaseChanged(.active)
+        let savedInSheet = await changing.save()
+        precondition(savedInSheet && changing.savedSettings?.share == "new-saved" && !fixture.update.isRunning)
+        changing.endEditing()
+        await wait { !fixture.update.isRunning }
+        precondition(fixture.events.suffix(3) == ["update", "scan:new-saved", "metadata"])
+
+        // 更新失敗はローカルtimelineへ伝播させない。indexあり／なしの両方を確認。
+        let repository = try MediaRepository(url: URL(fileURLWithPath: CommandLine.arguments[1]))
+        let timeline = TimelineRepository(store: repository)
+        let savedSettings = changing.savedSettings!
+        let scan = try await repository.begin(settings: savedSettings)
+        let file = ScannedMedia(path: "local.jpg", size: 100, creation: Date(), modified: Date())
+        try await repository.ingest([file], ticket: scan, progress: .init())
+        _ = try await repository.finish(scan, progress: .init(), completed: true)
+        let local = TimelineController(source: .local(repository: timeline, settings: savedSettings))
+        await local.loadInitial()
+        let localIDs = local.blocks.flatMap(\.items).map(\.id)
+        let display = local.displayGeneration
+        fixture.failUpdate = true
+        fixture.update.requestUpdate()
+        await wait { !fixture.update.isRunning }
+        await local.reloadIfEmpty()
+        precondition(fixture.update.state == .failed && fixture.update.errorMessage != nil)
+        precondition(local.loadedCount == 1 && local.displayGeneration == display && local.blocks.flatMap(\.items).map(\.id) == localIDs)
+        var absentSettings = savedSettings; absentSettings.share = "no-index"
+        let empty = TimelineController(source: .local(repository: timeline, settings: absentSettings))
+        await empty.loadInitial(); await empty.reloadIfEmpty()
+        precondition(empty.hasLoaded && empty.blocks.isEmpty && empty.errorMessage == nil && fixture.update.state == .failed)
+        precondition(changing.savedSettings == savedSettings)
+        fixture.failReadPassword = true
+        let keychainUnavailable = fixture.controller()
+        precondition(keychainUnavailable.savedSettings == savedSettings && keychainUnavailable.message != nil)
+        precondition(local.blocks.flatMap(\.items).map(\.id) == localIDs)
+        fixture.failReadPassword = false
+
+
+        precondition(changing.beginEditing())
+        changing.draft.share = "rejected"
+        fixture.failCheck = true
+        let failedInSheet = await changing.save()
+        precondition(!failedInSheet && changing.draft.share == "rejected" && changing.savedSettings == savedSettings)
+        precondition(local.blocks.flatMap(\.items).map(\.id) == localIDs)
+        changing.endEditing()
+        fixture.failUpdate = false; fixture.failCheck = false
+        fixture.pauseScan = true
+        fixture.update.requestUpdate()
+        await wait { fixture.scanGate != nil }
+        let manualStartCount = fixture.events.count
+        for _ in 0..<10 { fixture.update.requestUpdate() }
+        precondition(fixture.events.count == manualStartCount)
+        fixture.pauseScan = false; fixture.scanGate?.resume(); fixture.scanGate = nil
+        await wait { !fixture.update.isRunning }
+        print("PASS: settings-sheet lifecycle, discard/retain old settings, pending drain restart, save/new settings, local timeline with update failure, empty index/failure, failed check retention, manual deduplication")
         print("PASS: absent/corrupt/invalid/saved routing, missing password, retained input, save failure, navigate-before-update, connection drain and active suppression, library setting change")
     }
 }

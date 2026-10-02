@@ -6,6 +6,7 @@ import Observation
     var draft = SMBConnectionSettings()
     var password = ""
     private(set) var isSaving = false
+    private(set) var isEditing = false
     private(set) var message: String?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let update: LibraryUpdateController
@@ -36,6 +37,21 @@ import Observation
         draft = savedSettings ?? SMBConnectionSettings()
         message = nil
         loadPassword()
+    }
+
+    // アプリ共通の編集session。別windowから同じdraftを同時編集しない。
+    func beginEditing() -> Bool {
+        guard !isEditing, !isSaving else { return false }
+        isEditing = true
+        update.beginSettingsEditing()
+        prepareDraft()
+        return true
+    }
+
+    func endEditing() {
+        guard isEditing, !isSaving else { return }
+        isEditing = false
+        update.endSettingsEditing()
     }
 
     func loadPassword() {
