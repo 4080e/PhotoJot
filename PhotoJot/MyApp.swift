@@ -24,6 +24,7 @@ import SwiftUI
         let update: LibraryUpdateController
         let connection: ConnectionSettingsController
         let timeline: TimelineRepository
+        let thumbnails: ThumbnailService
     }
 
     // アプリで使う保存先・Repository・SMB接続制御をここだけで生成する。
@@ -58,6 +59,11 @@ import SwiftUI
             check: { settings, password in
                 _ = try await access.checkConnection(settings: settings, password: password)
             })
-        return Dependencies(update: update, connection: connection, timeline: TimelineRepository(store: repository))
+        // 8-1では共有instanceを保持するだけ。8-2で生成器とセルを接続する。
+        let thumbnails = ThumbnailService(cache: .applicationCache()) { _ in
+            throw ThumbnailService.GenerationError.notConfigured
+        }
+        return Dependencies(update: update, connection: connection,
+                            timeline: TimelineRepository(store: repository), thumbnails: thumbnails)
     }
 }
