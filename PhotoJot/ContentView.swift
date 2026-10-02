@@ -17,6 +17,15 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink {
+                        TimelineView()
+                    } label: {
+                        Label("timelineを開く", systemImage: "photo.on.rectangle")
+                    }
+                } footer: {
+                    Text("保存済みindexを表示します。SMB接続・走査・撮影日時の解析は開始しません。")
+                }
                 Group {
                     Section("接続先") {
                         TextField("ホスト名 / IPアドレス", text: $settings.host)

@@ -11,10 +11,9 @@ nonisolated enum TimelineDateKind: String, CaseIterable, Sendable {
     case internalMetadata, containerDate, confirmedFallback, provisional, unknown
 }
 
+// 表示groupは暦日のみ。記録offsetはTimelineDateと元metadataに保持する。
 nonisolated struct TimelineGroupKey: Hashable, Sendable {
     let day: String
-    // 撮影日時に実際に記録されたoffsetのみ。SMB / mvhdのUTC表現とは区別する。
-    let recordedOffset: String?
 }
 
 nonisolated struct TimelineDate: Sendable, Equatable {
@@ -24,7 +23,7 @@ nonisolated struct TimelineDate: Sendable, Equatable {
     let source: String?
     let quality: String?
     var groupKey: TimelineGroupKey? {
-        calendarDateTime.map { TimelineGroupKey(day: String($0.prefix(10)), recordedOffset: recordedOffset) }
+        calendarDateTime.map { TimelineGroupKey(day: String($0.prefix(10))) }
     }
 
     func sortKey(id: UUID) -> String {

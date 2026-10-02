@@ -71,7 +71,16 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
         for path in ["floating.jpg", "positive.heic", "negative.jpg", "quicktime.mov"] {
             check(item(path).date.calendarDateTime == "2026-01-01T23:30:00", "original wall clock \(path)")
         }
-        check(Set([item("floating.jpg"), item("positive.heic"), item("negative.jpg")].compactMap { $0.date.groupKey }).count == 3, "offset/absent groups separate")
+        check(Set([item("floating.jpg"), item("positive.heic"), item("negative.jpg")].compactMap { $0.date.groupKey }).count == 1, "offset/absent share calendar-day group")
+        check(item("floating.jpg").date.recordedOffset == nil && item("positive.heic").date.recordedOffset == "+09:00" && item("negative.jpg").date.recordedOffset == "-05:00", "offset metadata retained")
+        check(item("floating.jpg").date.groupKey != item("bulk/0.jpg").date.groupKey, "different days separate")
+        check(MetadataPolicy.version == 1 && TimelinePolicy.version == 1, "grouping needs no parser or key version change")
+        let testID = UUID()
+        let early = TimelineDate(calendarDateTime: "2026-01-01T09:00:00", recordedOffset: "-05:00", kind: .internalMetadata, source: nil, quality: nil)
+        let late = TimelineDate(calendarDateTime: "2026-01-01T10:00:00", recordedOffset: "+09:00", kind: .internalMetadata, source: nil, quality: nil)
+        let lateWithoutOffset = TimelineDate(calendarDateTime: late.calendarDateTime, recordedOffset: nil, kind: .internalMetadata, source: nil, quality: nil)
+        check(late.sortKey(id: testID) > early.sortKey(id: testID), "wall-clock order, not absolute time")
+        check(late.sortKey(id: testID) == lateWithoutOffset.sortKey(id: testID), "offset does not affect sort key")
         check(item("creation.jpg").date.source == "smbCreationTime" && item("write.jpg").date.source == "smbLastWriteTime", "provisional precedence")
         check(item("container.mp4").date.quality == "containerCreationTime" && item("container.mp4").date.recordedOffset == nil, "container not capture offset")
         let originalZone = NSTimeZone.default
@@ -128,6 +137,6 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
         check((unknownFirst.items + unknownLast.items).allSatisfy { $0.date.kind == .unknown }, "unknown status")
         do { _ = try await timeline.page(libraryID: unknownLibrary, after: firstPage.next); fatalError("wrong library cursor accepted") }
         catch TimelineError.changedDuringRead { }
-        print("Timeline checks passed: Stage3 migration, preserved metadata, offset groups, UTC fallback, kinds, timezone independence, keyset pages, unknown tail, stable IDs, generation, save integration, missing and stale cursor")
+        print("Timeline checks passed: Stage3 migration, preserved metadata, calendar-day groups, UTC fallback, kinds, timezone independence, keyset pages, unknown tail, stable IDs, generation, save integration, missing and stale cursor")
     }
 }
