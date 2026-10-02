@@ -1,4 +1,7 @@
 import Foundation
+#if DEBUG
+import os
+#endif
 
 actor ThumbnailService {
     // generatorの返却値は完成したJPEGデータ。cacheも同じ形式で保存・返却する。
@@ -16,6 +19,7 @@ actor ThumbnailService {
     private var jobs: [ThumbnailKey: Job] = [:]
     private var queue: [Job] = []
     private var active: Job?
+    private var generationEnabled = true
     private var worker: Task<Void, Never>?
 
     // generatorは成功・失敗・中断ともreader等のcleanupを終えてからreturn/throwする契約。
@@ -23,14 +27,21 @@ actor ThumbnailService {
         self.cache = cache; self.generate = generate
     }
 
-    func thumbnail(for key: ThumbnailKey) async throws -> Data {
+    func thumbnail(for key: ThumbnailKey, allowGeneration: Bool = true) async throws -> Data {
         try Task.checkCancellation()
         // 各readはcache専用queueへ渡す。生成枠の空きを待たない。
         if let data = await cache.load(key) {
             try Task.checkCancellation()
+            #if DEBUG
+            Logger(subsystem: "PhotoJot", category: "Thumbnail").debug("cache hit")
+            #endif
             return data
         }
+        #if DEBUG
+        Logger(subsystem: "PhotoJot", category: "Thumbnail").debug("cache miss")
+        #endif
         try Task.checkCancellation()
+        guard allowGeneration, generationEnabled else { throw CancellationError() }
         let user = UUID()
         let data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
@@ -50,6 +61,20 @@ actor ThumbnailService {
         return data
     }
 
+    func suspendAndWait() async {
+        generationEnabled = false
+        for job in jobs.values {
+            for user in job.users.values { user.resume(throwing: CancellationError()) }
+            job.users.removeAll()
+        }
+        jobs.removeAll(); queue.removeAll()
+        let old = worker
+        old?.cancel()
+        await old?.value
+    }
+
+    func resumeGeneration() { generationEnabled = true }
+
     #if DEBUG
     // 要求の登録完了を決定的に検証するための読み取り専用診断。
     func requestCount(for key: ThumbnailKey) -> Int { jobs[key]?.users.count ?? 0 }
@@ -67,7 +92,7 @@ actor ThumbnailService {
     }
 
     private func startNext() {
-        guard active == nil, !queue.isEmpty else { return }
+        guard generationEnabled, active == nil, !queue.isEmpty else { return }
         let job = queue.removeFirst()
         active = job
         let key = job.key, id = job.id, cache = cache, generate = generate
@@ -94,6 +119,15 @@ actor ThumbnailService {
 
     private func finished(id: UUID, result: Result<Data, Error>) {
         guard let job = active, job.id == id else { return }
+        #if DEBUG
+        let log = Logger(subsystem: "PhotoJot", category: "Thumbnail")
+        switch result {
+        case .success: log.debug("thumbnail ready")
+        case .failure(let error):
+            if error is CancellationError { log.debug("thumbnail cancelled") }
+            else { log.debug("thumbnail failed") }
+        }
+        #endif
         if jobs[job.key]?.id == id { jobs.removeValue(forKey: job.key) }
         for continuation in job.users.values { continuation.resume(with: result) }
         active = nil; worker = nil

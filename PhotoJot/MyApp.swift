@@ -8,7 +8,7 @@ import SwiftUI
         WindowGroup {
             switch dependencies {
             case .success(let value):
-                ContentView(update: value.update, connection: value.connection, timelineRepository: value.timeline)
+                ContentView(update: value.update, connection: value.connection, timelineRepository: value.timeline, thumbnails: value.thumbnails)
             case .failure(let error):
                 ContentUnavailableView("indexを開けません", systemImage: "exclamationmark.triangle",
                                        description: Text(error.localizedDescription))
@@ -16,7 +16,10 @@ import SwiftUI
         }
         // AppのscenePhaseを使用する。画面遷移や個別windowの消失では更新を止めない。
         .onChange(of: scenePhase, initial: true) { _, phase in
-            if case .success(let value) = dependencies { value.update.scenePhaseChanged(phase) }
+            if case .success(let value) = dependencies {
+                value.update.scenePhaseChanged(phase)
+                value.thumbnails.scenePhaseChanged(phase)
+            }
         }
     }
 
@@ -24,7 +27,7 @@ import SwiftUI
         let update: LibraryUpdateController
         let connection: ConnectionSettingsController
         let timeline: TimelineRepository
-        let thumbnails: ThumbnailService
+        let thumbnails: ThumbnailSession
     }
 
     // アプリで使う保存先・Repository・SMB接続制御をここだけで生成する。
@@ -52,17 +55,29 @@ import SwiftUI
             try await metadata.complete(settings: connection.settings, password: connection.password, progress: progress)
         })
         let credentials = CredentialStore()
+        let thumbnails = ThumbnailSession(cache: .applicationCache(), resolve: { id, libraryID in
+            try await repository.photoThumbnailTarget(id: id, libraryID: libraryID)
+        }, generate: { key in
+            guard let target = try await repository.photoThumbnailTarget(id: key.mediaEntryID, libraryID: key.libraryID),
+                  target.key == key else { throw CancellationError() }
+            guard let password = try await MainActor.run(body: { try credentials.password(account: target.settings.credentialAccount) }) else {
+                throw ScanFailure.noPassword
+            }
+            let data = try await access.photoThumbnail(target: target, password: password)
+            guard try await repository.photoThumbnailTarget(id: key.mediaEntryID, libraryID: key.libraryID)?.key == key else {
+                throw CancellationError()
+            }
+            return data
+        }, disconnect: { await access.disconnectWhenAvailable() })
         let connection = ConnectionSettingsController(update: update,
             readPassword: { try credentials.password(account: $0) },
             savePassword: { try credentials.save(password: $1, account: $0) },
             deletePassword: { try credentials.delete(account: $0) },
             check: { settings, password in
                 _ = try await access.checkConnection(settings: settings, password: password)
-            })
-        // 8-1では共有instanceを保持するだけ。8-2で生成器とセルを接続する。
-        let thumbnails = ThumbnailService(cache: .applicationCache()) { _ in
-            throw ThumbnailService.GenerationError.notConfigured
-        }
+            }, editingChanged: { thumbnails.setEditing($0) },
+            beginThumbnailCheck: { await thumbnails.beginConnectionCheck() },
+            endThumbnailCheck: { thumbnails.endConnectionCheck() })
         return Dependencies(update: update, connection: connection,
                             timeline: TimelineRepository(store: repository), thumbnails: thumbnails)
     }

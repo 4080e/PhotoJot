@@ -3,13 +3,15 @@ import SwiftUI
 struct TimelineView: View {
     @State private var model: TimelineController
     let update: LibraryUpdateController
+    let thumbnails: ThumbnailSession
     #if DEBUG
     @State private var selectedItem: TimelineItem?
     #endif
     private let columns = [GridItem(.adaptive(minimum: 88), spacing: 8)]
 
-    init(repository: TimelineRepository, settings: SMBConnectionSettings, update: LibraryUpdateController) {
+    init(repository: TimelineRepository, settings: SMBConnectionSettings, update: LibraryUpdateController, thumbnails: ThumbnailSession) {
         self.update = update
+        self.thumbnails = thumbnails
         _model = State(initialValue: TimelineController(source: .local(repository: repository, settings: settings)))
     }
 
@@ -38,7 +40,11 @@ struct TimelineView: View {
                         ForEach(model.blocks) { block in
                             Section {
                                 ForEach(block.items) { item in
-                                    TimelinePlaceholder(item: item)
+                                    Group {
+                                        if item.mediaType == "photo" {
+                                            PhotoThumbnailCell(item: item, session: thumbnails)
+                                        } else { TimelinePlaceholder(item: item) }
+                                    }
                                         #if DEBUG
                                         .contextMenu {
                                             Button("開発用情報") { selectedItem = item }
@@ -72,10 +78,14 @@ struct TimelineView: View {
         }
         .task { await model.loadInitial() }
         .onChange(of: update.phase) { _, phase in
-            if phase == .metadata { Task { await model.reloadIfEmpty() } }
+            if phase == .metadata {
+                thumbnails.revalidateVisibleItems()
+                Task { await model.reloadIfEmpty() }
+            }
         }
         .onChange(of: update.state) { _, state in
             if state == .completed || state == .failed || state == .cancelled {
+                thumbnails.revalidateVisibleItems()
                 Task { await model.reloadIfEmpty() }
             }
         }
@@ -119,7 +129,7 @@ struct TimelineView: View {
     }
 }
 
-// thumbnail導入時はこのセル内容を置換する。今回は画像取得処理を持たない。
+// 動画は段階8-3までplaceholderを維持する。
 private struct TimelinePlaceholder: View {
     let item: TimelineItem
     private var isVideo: Bool { item.mediaType == "video" }

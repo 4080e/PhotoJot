@@ -2,70 +2,100 @@ import Foundation
 import Network
 import SMBClient
 
-// 接続確認と走査は排他的に実行し、成功・失敗ともにセッションを切断する。
+// 全SMB処理は同じ接続とFIFO枠を利用する。scanはフォルダ、metadataはファイルで譲る。
 actor SMBAccessCoordinator {
-    private var isChecking = false
+    private let gate = SMBOperationGate()
+    private var client: SMBClient?
+    private var connectedSettings: SMBConnectionSettings?
+    private var connectedPassword: String?
+    #if DEBUG
+    var waitingOperationCount: Int { get async { await gate.waitingCount } }
+    #endif
 
-    func checkConnection(settings: SMBConnectionSettings, password: String) async throws -> Int {
-        guard !isChecking else { throw AccessError(message: "接続確認は実行中です。") }
-        guard (1...65535).contains(settings.port) else {
-            throw AccessError(message: "ポート番号は1〜65535で指定してください。")
+    private func disconnect() {
+        client?.session.disconnect(); client = nil
+        connectedSettings = nil; connectedPassword = nil
+    }
+
+    func disconnectWhenAvailable() async {
+        // cleanupは呼び出し元Taskのcancelにも関係なく最後まで待つ。
+        let cleanup = Task {
+            do { try await gate.acquire() } catch { return }
+            disconnect()
+            await gate.release()
         }
-        isChecking = true
-        defer { isChecking = false }
-        let client = SMBClient(host: settings.host, port: settings.port)
-        defer { client.session.disconnect() }
-        var stage = "接続"
+        await cleanup.value
+    }
+
+    private func withClient<T: Sendable>(settings: SMBConnectionSettings, password: String,
+                                        operation: (SMBClient) async throws -> T) async throws -> T {
+        try await gate.acquire()
         do {
             try Task.checkCancellation()
-            try await client.session.connect()
-            stage = "認証"
+            if connectedSettings != settings || connectedPassword != password { disconnect() }
+            if client == nil {
+                guard (1...65535).contains(settings.port) else { throw IndexFailure.invalidState }
+                let next = SMBClient(host: settings.host, port: settings.port)
+                client = next
+                try await next.session.connect(); try Task.checkCancellation()
+                try await next.login(username: settings.username, password: password,
+                                     domain: settings.domain.isEmpty ? nil : settings.domain)
+                try Task.checkCancellation()
+                try await next.connectShare(settings.share); try Task.checkCancellation()
+                connectedSettings = settings; connectedPassword = password
+            }
+            let value = try await operation(client!)
             try Task.checkCancellation()
-            try await client.login(username: settings.username, password: password,
-                                   domain: settings.domain.isEmpty ? nil : settings.domain)
-            stage = "共有への接続"
-            try Task.checkCancellation()
-            try await client.connectShare(settings.share)
-            stage = "ルートフォルダの一覧取得"
-            try Task.checkCancellation()
-            // shareを付加しない。空文字は共有直下を表す。
-            let entries = try await client.listDirectory(path: settings.rootPath)
-            try Task.checkCancellation()
-            return entries.filter { $0.name != "." && $0.name != ".." }.count
-        } catch is CancellationError {
-            throw CancellationError()
+            await gate.release()
+            return value
         } catch {
+            disconnect()
+            await gate.release()
             try Task.checkCancellation()
-            throw Self.failure(error, stage: stage)
+            throw error
+        }
+    }
+
+    func checkConnection(settings: SMBConnectionSettings, password: String) async throws -> Int {
+        do {
+            return try await withClient(settings: settings, password: password) { client in
+                // 接続確認後は認証情報を含むsessionを保持しない。
+                defer { disconnect() }
+                let entries = try await client.listDirectory(path: settings.rootPath)
+                return entries.filter { $0.name != "." && $0.name != ".." }.count
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw Self.failure(error, stage: "接続確認") }
+    }
+
+    func photoThumbnail(target: PhotoThumbnailTarget, password: String) async throws -> Data {
+        try await withClient(settings: target.settings, password: password) { client in
+            guard target.fileSize > 0, !target.path.hasPrefix("/"),
+                  !target.path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").contains("..") else {
+                throw IndexFailure.invalidState
+            }
+            let reader = client.fileReader(path: target.path)
+            do {
+                let size = try await reader.fileSize
+                try Task.checkCancellation()
+                guard size == UInt64(target.fileSize) else { throw IndexFailure.invalidState }
+                let source = SMBPhotoReader(reader: reader)
+                let data = try await PhotoThumbnailGenerator.generate(format: target.fileExtension, size: size) {
+                    try await source.read(offset: $0, count: $1)
+                }
+                try await reader.close()
+                try Task.checkCancellation()
+                return data
+            } catch {
+                try? await reader.close()
+                try Task.checkCancellation()
+                throw error
+            }
         }
     }
 
     func scan(settings: SMBConnectionSettings, password: String,
               consume: @Sendable ([ScannedMedia], ScanProgress) async throws -> Void) async throws -> ScanProgress {
-        guard !isChecking, (1...65535).contains(settings.port) else {
-            throw AccessError(message: "SMB処理を開始できません。接続確認の終了を待ってください。")
-        }
-        isChecking = true
-        defer { isChecking = false }
-        let client = SMBClient(host: settings.host, port: settings.port)
-        defer { client.session.disconnect() }
-        var stage = "接続"
-        do {
-            try Task.checkCancellation()
-            try await client.session.connect()
-            stage = "認証"
-            try Task.checkCancellation()
-            try await client.login(username: settings.username, password: password,
-                                   domain: settings.domain.isEmpty ? nil : settings.domain)
-            stage = "共有への接続"
-            try Task.checkCancellation()
-            try await client.connectShare(settings.share)
-        } catch is CancellationError { throw CancellationError() }
-        catch {
-            try Task.checkCancellation()
-            throw Self.failure(error, stage: stage)
-        }
-
         var pending = [settings.rootPath]
         var batch: [ScannedMedia] = []
         var progress = ScanProgress()
@@ -73,7 +103,11 @@ actor SMBAccessCoordinator {
             try await UpdateCheckpoint.yield()
             let entries: [File]
             // SMBClient 0.3.1の一覧取得はTaskキャンセル非対応。応答後に必ず確認する。
-            do { entries = try await client.listDirectory(path: directory) }
+            do {
+                entries = try await withClient(settings: settings, password: password) {
+                    try await $0.listDirectory(path: directory)
+                }
+            }
             catch is CancellationError { throw CancellationError() }
             catch {
                 try Task.checkCancellation()
@@ -115,33 +149,10 @@ actor SMBAccessCoordinator {
         return progress
     }
 
-    // scanと同じ排他フラグで、処理全体を一つのsessionに限定する。
+    // 保存バッチは維持し、readerをcloseしたファイル境界でSMB枠を譲る。
     func completeMetadata(settings: SMBConnectionSettings, password: String,
                           next: @Sendable () async throws -> [MetadataTarget],
                           save: @Sendable ([MetadataUpdate]) async throws -> Void) async throws {
-        guard !isChecking, (1...65535).contains(settings.port) else {
-            throw AccessError(message: "ほかのSMB処理が終了するまでお待ちください。")
-        }
-        isChecking = true
-        defer { isChecking = false }
-        let client = SMBClient(host: settings.host, port: settings.port)
-        defer { client.session.disconnect() }
-        var stage = "接続"
-        do {
-            try Task.checkCancellation()
-            try await client.session.connect()
-            stage = "認証"
-            try Task.checkCancellation()
-            try await client.login(username: settings.username, password: password,
-                                   domain: settings.domain.isEmpty ? nil : settings.domain)
-            stage = "共有への接続"
-            try Task.checkCancellation()
-            try await client.connectShare(settings.share)
-        } catch is CancellationError { throw CancellationError() }
-        catch {
-            try Task.checkCancellation()
-            throw Self.failure(error, stage: stage)
-        }
         while true {
             try await UpdateCheckpoint.yield()
             let targets = try await next()
@@ -150,7 +161,19 @@ actor SMBAccessCoordinator {
             var updates: [MetadataUpdate] = []
             for target in targets {
                 try await UpdateCheckpoint.yield()
-                let outcome = try await readMetadata(client: client, target: target)
+                let outcome: MetadataOutcome
+                do {
+                    outcome = try await withClient(settings: settings, password: password) {
+                        let result = try await self.readMetadata(client: $0, target: target)
+                        // read/close失敗を結果として返す場合も、不完全なsessionを次へ残さない。
+                        if result.requiresRetry { disconnect() }
+                        return result
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch {
+                    try Task.checkCancellation()
+                    throw Self.failure(error, stage: "撮影日時の取得")
+                }
                 try await UpdateCheckpoint.yield()
                 updates.append(MetadataUpdate(target: target, outcome: outcome))
                 if outcome.requiresRetry {
@@ -187,6 +210,7 @@ actor SMBAccessCoordinator {
             try? await file.close()
             throw CancellationError()
         } catch {
+            if Task.isCancelled { try? await file.close(); throw CancellationError() }
             outcome = MetadataCore.outcome(format: format,
                 evidence: .init(diagnostics: [.init(kind: .smb, message: "SMB open/read失敗")]), creation: nil, modified: nil)
         }
@@ -234,5 +258,15 @@ actor SMBAccessCoordinator {
         let message: String
         nonisolated var errorDescription: String? { message }
         nonisolated init(message: String) { self.message = message }
+    }
+}
+
+// Coordinatorの排他枠内でのみ作成し、生成器の逐次readだけへ渡す。
+// FileReaderを他のTaskへ共有せず、generatorが戻ってからcloseする。
+nonisolated private final class SMBPhotoReader: @unchecked Sendable {
+    let reader: FileReader
+    init(reader: FileReader) { self.reader = reader }
+    func read(offset: UInt64, count: Int) async throws -> Data {
+        try await reader.read(offset: offset, length: UInt32(count))
     }
 }

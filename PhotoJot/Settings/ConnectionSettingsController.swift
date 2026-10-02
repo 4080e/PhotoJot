@@ -15,11 +15,20 @@ import Observation
     @ObservationIgnored private let deletePassword: (String) throws -> Void
     @ObservationIgnored private let check: (SMBConnectionSettings, String) async throws -> Void
 
+    @ObservationIgnored private let editingChanged: (Bool) -> Void
+    @ObservationIgnored private let beginThumbnailCheck: () async -> Void
+    @ObservationIgnored private let endThumbnailCheck: () -> Void
+
     init(defaults: UserDefaults = .standard, update: LibraryUpdateController,
          readPassword: @escaping (String) throws -> String?,
          savePassword: @escaping (String, String) throws -> Void,
          deletePassword: @escaping (String) throws -> Void,
-         check: @escaping (SMBConnectionSettings, String) async throws -> Void) {
+         check: @escaping (SMBConnectionSettings, String) async throws -> Void,
+         editingChanged: @escaping (Bool) -> Void = { _ in },
+         beginThumbnailCheck: @escaping () async -> Void = {},
+         endThumbnailCheck: @escaping () -> Void = {}) {
+        self.editingChanged = editingChanged
+        self.beginThumbnailCheck = beginThumbnailCheck; self.endThumbnailCheck = endThumbnailCheck
         self.defaults = defaults; self.update = update
         self.readPassword = readPassword; self.savePassword = savePassword
         self.deletePassword = deletePassword; self.check = check
@@ -43,6 +52,7 @@ import Observation
     func beginEditing() -> Bool {
         guard !isEditing, !isSaving else { return false }
         isEditing = true
+        editingChanged(true)
         update.beginSettingsEditing()
         prepareDraft()
         return true
@@ -51,6 +61,7 @@ import Observation
     func endEditing() {
         guard isEditing, !isSaving else { return }
         isEditing = false
+        editingChanged(false)
         update.endSettingsEditing()
     }
 
@@ -70,8 +81,9 @@ import Observation
             let data = try JSONEncoder().encode(settings)
             let secret = password
             await update.beginConnectionCheck()
+            await beginThumbnailCheck()
             do {
-                defer { update.endConnectionCheck() }
+                defer { update.endConnectionCheck(); endThumbnailCheck() }
                 try Task.checkCancellation()
                 try await check(settings, secret)
                 try Task.checkCancellation()

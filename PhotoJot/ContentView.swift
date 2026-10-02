@@ -4,12 +4,13 @@ struct ContentView: View {
     let update: LibraryUpdateController
     let connection: ConnectionSettingsController
     let timelineRepository: TimelineRepository
+    let thumbnails: ThumbnailSession
     @State private var showingSettings = false
 
     var body: some View {
         NavigationStack {
             if let settings = connection.savedSettings {
-                TimelineView(repository: timelineRepository, settings: settings, update: update)
+                TimelineView(repository: timelineRepository, settings: settings, update: update, thumbnails: thumbnails)
                     .id(settings)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
