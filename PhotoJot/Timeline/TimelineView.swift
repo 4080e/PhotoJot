@@ -2,11 +2,13 @@ import SwiftUI
 
 struct TimelineView: View {
     @State private var model: TimelineController
+    let update: LibraryUpdateController
     @State private var selectedItem: TimelineItem?
     private let columns = [GridItem(.adaptive(minimum: 88), spacing: 8)]
 
-    init(repository: TimelineRepository) {
-        _model = State(initialValue: TimelineController(source: .savedIndex(repository: repository)))
+    init(repository: TimelineRepository, settings: SMBConnectionSettings, update: LibraryUpdateController) {
+        self.update = update
+        _model = State(initialValue: TimelineController(source: .local(repository: repository, settings: settings)))
     }
 
     var body: some View {
@@ -25,7 +27,7 @@ struct TimelineView: View {
                     }
                 } else {
                     ContentUnavailableView("表示するメディアがありません", systemImage: "photo.on.rectangle",
-                                           description: Text(model.emptyMessage))
+                                           description: Text(update.isRunning ? "ライブラリを読み込み中です。" : model.emptyMessage))
                 }
             } else {
                 ScrollView {
@@ -55,6 +57,31 @@ struct TimelineView: View {
         .navigationTitle("timeline")
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.loadInitial() }
+        .onChange(of: update.phase) { _, phase in
+            if phase == .metadata { Task { await model.reloadIfEmpty() } }
+        }
+        .onChange(of: update.state) { _, state in
+            if state == .completed || state == .failed || state == .cancelled {
+                Task { await model.reloadIfEmpty() }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if update.isRunning {
+                HStack {
+                    ProgressView()
+                    Text(update.state == .cancelling ? "更新を中断中…" :
+                        (update.phase == .metadata ? "撮影日時を更新中（\(update.metadataProgress.completed) / \(update.metadataProgress.total)）" : "ライブラリを更新中…"))
+                        .font(.footnote)
+                    Spacer()
+                }.padding().background(.bar)
+            } else if let error = update.errorMessage {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("更新できませんでした。保存済みの内容を表示します。")
+                    Text(error).foregroundStyle(.secondary).lineLimit(2)
+                    Button("再試行") { update.requestUpdate() }.disabled(update.isCheckingConnection)
+                }.font(.footnote).frame(maxWidth: .infinity, alignment: .leading).padding().background(.bar)
+            }
+        }
         .sheet(item: $selectedItem) { item in TimelineItemDetails(item: item) }
     }
 

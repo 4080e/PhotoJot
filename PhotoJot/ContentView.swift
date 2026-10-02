@@ -2,78 +2,66 @@ import SwiftUI
 
 struct ContentView: View {
     let update: LibraryUpdateController
-    let coordinator: SMBAccessCoordinator
+    let connection: ConnectionSettingsController
     let timelineRepository: TimelineRepository
-    @State private var timelineDiagnostics: TimelineDiagnosticsController
-    @State private var settings = SMBConnectionSettings()
-    @State private var password = ""
-    @State private var isChecking = false
-    @State private var message: String?
-    @State private var succeeded = false
-    @State private var didLoad = false
-    private let credentials = CredentialStore()
-
-    init(update: LibraryUpdateController, coordinator: SMBAccessCoordinator, timelineRepository: TimelineRepository) {
-        self.update = update
-        self.coordinator = coordinator
-        self.timelineRepository = timelineRepository
-        _timelineDiagnostics = State(initialValue: TimelineDiagnosticsController(repository: timelineRepository))
-    }
+    @State private var showingSettings = false
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    NavigationLink {
-                        TimelineView(repository: timelineRepository)
-                    } label: {
-                        Label("timelineを開く", systemImage: "photo.on.rectangle")
-                    }
-                } footer: {
-                    Text("保存済みindexを表示します。SMB接続・走査・撮影日時の解析は開始しません。")
-                }
-                Group {
-                    Section("接続先") {
-                        TextField("ホスト名 / IPアドレス", text: $settings.host)
-                            .keyboardType(.URL)
-                        TextField("共有名", text: $settings.share)
-                        TextField("ルートパス（空欄で共有直下）", text: $settings.rootPath)
-                    }
-                    Section {
-                        TextField("ユーザー名", text: $settings.username)
-                            .textContentType(.username)
-                        SecureField("パスワード", text: Binding(
-                            get: { password },
-                            set: { password = $0; message = nil }
-                        ))
-                            .textContentType(.password)
-                    } header: {
-                        Text("認証")
-                    } footer: {
-                        Text("接続確認に成功すると設定を保存します。パスワードはこの端末のKeychainに保存します。ルートパスは共有からの相対パス（例：Photos/2026）です。")
-                    }
-                    Section {
-                        Button {
-                            Task { await checkConnection() }
-                        } label: {
-                            HStack {
-                                Text(isChecking ? "接続確認中…" : "接続確認")
-                                if isChecking { Spacer(); ProgressView() }
+            if let settings = connection.savedSettings {
+                TimelineView(repository: timelineRepository, settings: settings, update: update)
+                    .id(settings)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("設定", systemImage: "gearshape") {
+                                connection.prepareDraft()
+                                showingSettings = true
                             }
                         }
-                        .disabled(isChecking)
                     }
-                }
-                .disabled(isChecking || update.isRunning || timelineDiagnostics.isRunning)
-                if let message {
-                    Section("確認結果") {
-                        Label(message, systemImage: succeeded ? "checkmark.circle" : "exclamationmark.circle")
-                            .foregroundStyle(succeeded ? Color.primary : Color.red)
+            } else {
+                settingsView
+            }
+        }
+        .sheet(isPresented: $showingSettings) {
+            NavigationStack {
+                settingsView
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("閉じる") { showingSettings = false }
+                                .disabled(connection.isSaving)
+                        }
                     }
+            }
+            .interactiveDismissDisabled(connection.isSaving)
+        }
+    }
+
+    private var settingsView: some View {
+        ConnectionSettingsView(controller: connection) { showingSettings = false }
+            .toolbar {
+                ToolbarItem(placement: .bottomBar) {
+                    NavigationLink("更新・診断") {
+                        LibraryDevelopmentView(update: update, repository: timelineRepository)
+                    }
+                    .disabled(connection.isSaving)
                 }
+            }
+    }
+}
+
+private struct LibraryDevelopmentView: View {
+    let update: LibraryUpdateController
+    @State private var timelineDiagnostics: TimelineDiagnosticsController
+    init(update: LibraryUpdateController, repository: TimelineRepository) {
+        self.update = update
+        _timelineDiagnostics = State(initialValue: TimelineDiagnosticsController(repository: repository))
+    }
+    var body: some View {
+        Form {
                 Section {
                     Button(update.state == .cancelling ? "中断後に更新" : "保存済みの接続先を更新") { update.requestUpdate() }
-                        .disabled(isChecking || update.state == .running || update.restartRequested || timelineDiagnostics.isRunning)
+                        .disabled(update.state == .running || update.restartRequested || timelineDiagnostics.isRunning)
                     if update.isRunning {
                         ProgressView(update.state == .cancelling ? "中断待ち…" :
                             (update.phase == .metadata ? "撮影日時を解析中…" : "走査中…"))
@@ -106,7 +94,7 @@ struct ContentView: View {
                 }
                 Section {
                     Button("timeline診断（ローカルのみ）") { timelineDiagnostics.start() }
-                        .disabled(isChecking || update.isRunning || timelineDiagnostics.isRunning)
+                        .disabled(update.isRunning || timelineDiagnostics.isRunning)
                     if timelineDiagnostics.isRunning {
                         ProgressView("日付キー構築・集計中")
                         Button("診断を中断", role: .cancel) { timelineDiagnostics.cancel() }
@@ -135,61 +123,6 @@ struct ContentView: View {
             }
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
-            .navigationTitle("PhotoJot")
-            .onAppear(perform: loadSettings)
-            .onChange(of: settings) { old, new in
-                message = nil
-                if old.credentialAccount != new.credentialAccount { loadPassword() }
-            }
-        }
-    }
-
-    private func loadSettings() {
-        guard !didLoad else { return }
-        didLoad = true
-        if let data = UserDefaults.standard.data(forKey: SMBConnectionSettings.storageKey),
-           let saved = try? JSONDecoder().decode(SMBConnectionSettings.self, from: data) {
-            settings = saved
-        }
-        loadPassword()
-    }
-
-    private func loadPassword() {
-        password = ""
-        do {
-            password = try credentials.password(account: settings.credentialAccount) ?? ""
-        } catch {
-            message = error.localizedDescription
-            succeeded = false
-        }
-    }
-
-    @MainActor
-    private func checkConnection() async {
-        guard !isChecking else { return }
-        isChecking = true
-        message = nil
-        succeeded = false
-        defer { isChecking = false }
-        do {
-            let connection = try settings.validated()
-            let count = try await coordinator.checkConnection(settings: connection, password: password)
-            do {
-                let data = try JSONEncoder().encode(connection)
-                let previous = UserDefaults.standard.data(forKey: SMBConnectionSettings.storageKey)
-                    .flatMap { try? JSONDecoder().decode(SMBConnectionSettings.self, from: $0) }
-                try credentials.save(password: password, account: connection.credentialAccount)
-                UserDefaults.standard.set(data, forKey: SMBConnectionSettings.storageKey)
-                if let previous, previous.credentialAccount != connection.credentialAccount {
-                    try credentials.delete(account: previous.credentialAccount)
-                }
-                succeeded = true
-                message = "接続成功\nルート直下の項目数：\(count)"
-            } catch {
-                message = "接続成功（ルート直下：\(count)項目）\n設定の保存処理に失敗しました。\n\(error.localizedDescription)"
-            }
-        } catch {
-            message = error.localizedDescription
-        }
+            .navigationTitle("更新・診断")
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-nonisolated struct SMBConnectionSettings: Codable, Equatable, Sendable {
+nonisolated struct SMBConnectionSettings: Codable, Equatable, Hashable, Sendable {
     var host = ""
     var port = 445
     var username = ""

@@ -21,6 +21,8 @@ nonisolated struct LibraryUpdateConnection: Sendable {
     private(set) var libraryName: String?
     private(set) var restartRequested = false
     var isRunning: Bool { state == .running || state == .cancelling }
+    private(set) var isCheckingConnection = false
+    @ObservationIgnored private var connectionConfigured = true
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var lastScenePhase: ScenePhase?
@@ -48,7 +50,7 @@ nonisolated struct LibraryUpdateConnection: Sendable {
     }
 
     func requestUpdate() {
-        guard lastScenePhase != .background else { return }
+        guard connectionConfigured, !isCheckingConnection, lastScenePhase != .background else { return }
         if task != nil {
             if state == .cancelling { restartRequested = true }
             return
@@ -96,6 +98,17 @@ nonisolated struct LibraryUpdateConnection: Sendable {
         state = .cancelling
         task?.cancel()
     }
+
+    func setConnectionConfigured(_ configured: Bool) { connectionConfigured = configured }
+
+    // 保存操作中だけ更新開始を抑止。古い接続設定のTaskが終了してから接続確認する。
+    func beginConnectionCheck() async {
+        isCheckingConnection = true
+        cancel()
+        await task?.value
+    }
+
+    func endConnectionCheck() { isCheckingConnection = false }
 
     private func setScanProgress(_ value: ScanProgress) { scanProgress = value }
     private func setMetadataProgress(_ value: MetadataProgress) { metadataProgress = value }

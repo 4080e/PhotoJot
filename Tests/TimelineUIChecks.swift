@@ -138,6 +138,26 @@ private actor PageFeed {
         await absent.loadInitial()
         check(absent.hasLoaded && absent.blocks.isEmpty && absent.errorMessage == nil, "no saved library")
 
+        let emptyFeed = PageFeed(pages: [page([], more: false), page([replacement], more: false)])
+        let refreshEmpty = TimelineController(source: emptyFeed.source())
+        await refreshEmpty.loadInitial()
+        await refreshEmpty.retry()
+        check(refreshEmpty.loadedCount == 1, "empty/no-next explicit retry rereads first page")
+        let retainedGeneration = refreshEmpty.displayGeneration
+        await refreshEmpty.reloadIfEmpty()
+        check(await emptyFeed.requestCount() == 2 && refreshEmpty.displayGeneration == retainedGeneration,
+              "update completion never resets populated timeline")
+
+        let racingFeed = PageFeed(pages: [page([], more: false), page([replacement], more: false)])
+        await racingFeed.suspend()
+        let racing = TimelineController(source: racingFeed.source())
+        let initialRead = Task { await racing.loadInitial() }
+        await racingFeed.waitForRead()
+        await racing.reloadIfEmpty() // 走査終了が初回の空page読み込みに重なる。
+        await racingFeed.release()
+        await initialRead.value
+        check(racing.loadedCount == 1 && !racing.isLoading, "empty reload request survives in-flight read")
+
         // 実repositoryでprepared indexを起動。metadata/SMBモジュールのネットワーク実装はこのtest binaryへ含めない。
         let url = URL(fileURLWithPath: CommandLine.arguments[1])
         let repository = try MediaRepository(url: url)
@@ -171,6 +191,25 @@ private actor PageFeed {
         let reopened = TimelineController(source: .local(repository: try TimelineRepository(url: url), settings: settings))
         await reopened.loadInitial()
         check(reopened.blocks.flatMap(\.items).map(\.id) == before.items.map(\.id), "offline reopen stable order")
+        // 別Libraryで同じパスを使っても既存のscope識別で混ざらない。
+        var otherSettings = settings; otherSettings.share = "other"
+        let other = TimelineController(source: .local(repository: timeline, settings: otherSettings))
+        await other.loadInitial()
+        check(other.hasLoaded && other.blocks.isEmpty, "new library starts empty, never shows old library")
+        let otherScan = try await repository.begin(settings: otherSettings)
+        try await repository.ingest([files[0]], ticket: otherScan, progress: .init())
+        // 更新の正常完了を待たずに保存済みバッチを読める。
+        await other.reloadIfEmpty()
+        check(other.loadedCount == 1 && other.blocks.flatMap(\.items).allSatisfy { $0.libraryID == otherScan.libraryID },
+              "new library visible while scan running; old entries excluded")
+        check(local.loadedCount == 202 && local.blocks.flatMap(\.items).allSatisfy { $0.libraryID == scan.libraryID },
+              "old controller stays bound to original library")
+        _ = try await repository.finish(otherScan, progress: .init(), completed: true)
+        let switchBack = TimelineController(source: .local(repository: timeline, settings: settings))
+        await switchBack.loadInitial()
+        check(switchBack.loadedCount == 200 && switchBack.blocks.flatMap(\.items).allSatisfy { $0.libraryID == scan.libraryID },
+              "switch back reads only original library")
+        print("PASS: empty retry, no-library recovery, reload during initial read, populated display preserved, offline/index-first, library isolation and switch back")
         print("Timeline UI checks passed: first/next/final, duplicate suppression, incremental groups, mixed offsets, unknown, stable order, invalidation, retry, empty, local-only repository, missing exclusion, metadata preservation")
     }
 }

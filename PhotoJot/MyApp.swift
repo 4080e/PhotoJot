@@ -8,7 +8,7 @@ import SwiftUI
         WindowGroup {
             switch dependencies {
             case .success(let value):
-                ContentView(update: value.update, coordinator: value.access, timelineRepository: value.timeline)
+                ContentView(update: value.update, connection: value.connection, timelineRepository: value.timeline)
             case .failure(let error):
                 ContentUnavailableView("indexを開けません", systemImage: "exclamationmark.triangle",
                                        description: Text(error.localizedDescription))
@@ -22,7 +22,7 @@ import SwiftUI
 
     private struct Dependencies {
         let update: LibraryUpdateController
-        let access: SMBAccessCoordinator
+        let connection: ConnectionSettingsController
         let timeline: TimelineRepository
     }
 
@@ -50,6 +50,14 @@ import SwiftUI
         }, metadata: { connection, progress in
             try await metadata.complete(settings: connection.settings, password: connection.password, progress: progress)
         })
-        return Dependencies(update: update, access: access, timeline: TimelineRepository(store: repository))
+        let credentials = CredentialStore()
+        let connection = ConnectionSettingsController(update: update,
+            readPassword: { try credentials.password(account: $0) },
+            savePassword: { try credentials.save(password: $1, account: $0) },
+            deletePassword: { try credentials.delete(account: $0) },
+            check: { settings, password in
+                _ = try await access.checkConnection(settings: settings, password: password)
+            })
+        return Dependencies(update: update, connection: connection, timeline: TimelineRepository(store: repository))
     }
 }

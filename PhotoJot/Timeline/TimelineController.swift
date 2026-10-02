@@ -11,15 +11,6 @@ nonisolated struct TimelinePageSource: Sendable {
              page: { try await repository.page(libraryID: $0, after: $1) })
     }
 
-    static func savedIndex(repository: TimelineRepository) -> Self {
-        Self(prepare: {
-            guard let data = UserDefaults.standard.data(forKey: SMBConnectionSettings.storageKey) else {
-                throw TimelineError.noLibrary
-            }
-            let settings = try JSONDecoder().decode(SMBConnectionSettings.self, from: data).validated()
-            return try await repository.prepare(settings: settings)
-        }, page: { try await repository.page(libraryID: $0, after: $1) })
-    }
 
 }
 
@@ -42,6 +33,7 @@ nonisolated struct TimelinePageSource: Sendable {
     private(set) var emptyMessage = "保存済みの対象メディアがありません。"
     private(set) var displayGeneration = UUID()
     @ObservationIgnored private let source: TimelinePageSource
+    @ObservationIgnored private var emptyReloadRequested = false
     @ObservationIgnored private var libraryID: UUID?
     @ObservationIgnored private var cursor: TimelineCursor?
     @ObservationIgnored private var loadTriggerIDs: Set<UUID> = []
@@ -52,15 +44,31 @@ nonisolated struct TimelinePageSource: Sendable {
 
     func loadInitial() async {
         guard !isLoading, !hasLoaded else { return }
-        isLoading = true; errorMessage = nil
+        await reloadFromBeginning()
+    }
+
+    // 明示的な先頭再取得。取得成功までは現在の表示を保持する。
+    func reloadFromBeginning() async {
+        guard !isLoading else { return }
+        isLoading = true
         defer { isLoading = false }
-        do { try await startFromBeginning() }
-        catch is CancellationError { }
-        catch TimelineError.noLibrary {
-            hasLoaded = true
-            emptyMessage = "保存済みindexがありません。開発用画面で接続先とindexを準備してください。"
-        }
-        catch { errorMessage = error.localizedDescription }
+        repeat {
+            emptyReloadRequested = false
+            errorMessage = nil
+            do { try await startFromBeginning(replacing: true) }
+            catch is CancellationError { return }
+            catch TimelineError.noLibrary {
+                hasLoaded = true
+                emptyMessage = "保存済みの写真・動画はまだありません。ライブラリを更新してください。"
+            }
+            catch { errorMessage = error.localizedDescription }
+        } while emptyReloadRequested && blocks.isEmpty && !Task.isCancelled
+    }
+
+    func reloadIfEmpty() async {
+        guard blocks.isEmpty else { return }
+        if isLoading { emptyReloadRequested = true; return }
+        await reloadFromBeginning()
     }
 
     func loadMoreIfNeeded(visibleID: UUID) async {
@@ -69,7 +77,8 @@ nonisolated struct TimelinePageSource: Sendable {
     }
 
     func retry() async {
-        if hasLoaded { await loadNext() }
+        if blocks.isEmpty { await reloadFromBeginning() }
+        else if hasLoaded { await loadNext() }
         else { await loadInitial() }
     }
 
