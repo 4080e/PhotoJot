@@ -56,15 +56,15 @@ import SwiftUI
         })
         let credentials = CredentialStore()
         let thumbnails = ThumbnailSession(cache: .applicationCache(), resolve: { id, libraryID in
-            try await repository.photoThumbnailTarget(id: id, libraryID: libraryID)
+            try await repository.thumbnailTarget(id: id, libraryID: libraryID)
         }, generate: { key in
-            guard let target = try await repository.photoThumbnailTarget(id: key.mediaEntryID, libraryID: key.libraryID),
+            guard let target = try await repository.thumbnailTarget(id: key.mediaEntryID, libraryID: key.libraryID),
                   target.key == key else { throw CancellationError() }
             guard let password = try await MainActor.run(body: { try credentials.password(account: target.settings.credentialAccount) }) else {
                 throw ScanFailure.noPassword
             }
-            let data = try await access.photoThumbnail(target: target, password: password)
-            guard try await repository.photoThumbnailTarget(id: key.mediaEntryID, libraryID: key.libraryID)?.key == key else {
+            let data = try await access.thumbnail(target: target, password: password)
+            guard try await repository.thumbnailTarget(id: key.mediaEntryID, libraryID: key.libraryID)?.key == key else {
                 throw CancellationError()
             }
             return data

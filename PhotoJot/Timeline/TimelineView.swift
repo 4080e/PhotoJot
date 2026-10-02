@@ -40,11 +40,7 @@ struct TimelineView: View {
                         ForEach(model.blocks) { block in
                             Section {
                                 ForEach(block.items) { item in
-                                    Group {
-                                        if item.mediaType == "photo" {
-                                            PhotoThumbnailCell(item: item, session: thumbnails)
-                                        } else { TimelinePlaceholder(item: item) }
-                                    }
+                                    TimelineThumbnailCell(item: item, session: thumbnails)
                                         #if DEBUG
                                         .contextMenu {
                                             Button("開発用情報") { selectedItem = item }
@@ -126,22 +122,5 @@ struct TimelineView: View {
             Text("\(model.loadedCount)件・すべて表示しました")
                 .font(.footnote).foregroundStyle(.secondary)
         }
-    }
-}
-
-// 動画は段階8-3までplaceholderを維持する。
-private struct TimelinePlaceholder: View {
-    let item: TimelineItem
-    private var isVideo: Bool { item.mediaType == "video" }
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-            Image(systemName: isVideo ? "video.fill" : "photo")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .contentShape(Rectangle())
-        .accessibilityLabel(isVideo ? "動画" : "写真")
     }
 }

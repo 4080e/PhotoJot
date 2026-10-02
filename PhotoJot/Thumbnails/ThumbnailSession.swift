@@ -13,7 +13,7 @@ import CoreGraphics
     var canGenerate: Bool { !background && !editing && !checking }
     @ObservationIgnored private let memory = ThumbnailMemoryCache()
     @ObservationIgnored private let cache: ThumbnailCache
-    @ObservationIgnored private let resolve: @Sendable (UUID, UUID) async throws -> PhotoThumbnailTarget?
+    @ObservationIgnored private let resolve: @Sendable (UUID, UUID) async throws -> MediaThumbnailTarget?
     @ObservationIgnored private let generator: ThumbnailService.Generator
     @ObservationIgnored private let disconnect: @Sendable () async -> Void
     @ObservationIgnored private var transition: Task<Void, Never>?
@@ -23,7 +23,7 @@ import CoreGraphics
         return try await generate(key)
     }
 
-    init(cache: ThumbnailCache, resolve: @escaping @Sendable (UUID, UUID) async throws -> PhotoThumbnailTarget?,
+    init(cache: ThumbnailCache, resolve: @escaping @Sendable (UUID, UUID) async throws -> MediaThumbnailTarget?,
          generate: @escaping ThumbnailService.Generator, disconnect: @escaping @Sendable () async -> Void) {
         self.cache = cache; self.resolve = resolve; self.generator = generate; self.disconnect = disconnect
     }

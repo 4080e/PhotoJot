@@ -46,9 +46,10 @@ actor PhotoWork {
         let libraryID = try await timeline.prepare(settings: settings)
         let page = try await timeline.page(libraryID: libraryID)
         let photo = page.items.first { $0.mediaType == "photo" }!, video = page.items.first { $0.mediaType == "video" }!
-        let originalTarget = try await repo.photoThumbnailTarget(id: photo.id, libraryID: libraryID)!
-        check(try await repo.photoThumbnailTarget(id: video.id, libraryID: libraryID) == nil)
-        check(try await repo.photoThumbnailTarget(id: photo.id, libraryID: UUID()) == nil)
+        let originalTarget = try await repo.thumbnailTarget(id: photo.id, libraryID: libraryID)!
+        let videoTarget = try await repo.thumbnailTarget(id: video.id, libraryID: libraryID)!
+        check(videoTarget.key.specificationVersion == VideoThumbnailPolicy.version)
+        check(try await repo.thumbnailTarget(id: photo.id, libraryID: UUID()) == nil)
         let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
         let buffer = NSMutableData()
@@ -58,20 +59,19 @@ actor PhotoWork {
         let work = PhotoWork(jpeg)
         let cache = ThumbnailCache(directory: root.appendingPathComponent("cache"))
         var disconnects = 0
-        let session = ThumbnailSession(cache: cache, resolve: { try await repo.photoThumbnailTarget(id: $0, libraryID: $1) },
+        let session = ThumbnailSession(cache: cache, resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
             generate: { _ in try await work.run() }, disconnect: { await MainActor.run { disconnects += 1 } })
         let pending = Task { try await session.imageKey(id: photo.id, libraryID: libraryID) }
         await wait { await work.waiting }
         // SMB生成待機中でもローカルpage取得は完了する。
         check(try await timeline.page(libraryID: libraryID).items.count == 2)
-        check(try await session.imageData(id: video.id, libraryID: libraryID) == nil)
         // 取得中にgenerationが変化した結果は採用しない。
         let rescan = try await repo.begin(settings: settings)
         try await repo.ingest([ScannedMedia(path: "a.jpg", size: 101, creation: date, modified: date)], ticket: rescan, progress: .init())
         _ = try await repo.finish(rescan, progress: .init(), completed: false)
         await work.release()
         check(try await pending.value == nil)
-        let updated = try await repo.photoThumbnailTarget(id: photo.id, libraryID: libraryID)!
+        let updated = try await repo.thumbnailTarget(id: photo.id, libraryID: libraryID)!
         check(updated.key != originalTarget.key)
         let next = Task { try await session.imageData(id: photo.id, libraryID: libraryID) }
         await wait { await work.waiting }; await work.release()
@@ -141,6 +141,35 @@ actor PhotoWork {
         await wait { await work.stopped == stops + 2 }
         do { _ = try await resumed.value; preconditionFailure("cell cancel") } catch is CancellationError { }
         await work.release()
+        // 動画も同じSessionでgeneration判定・disk/memory cacheを通る。
+        let videoWork = PhotoWork(jpeg)
+        let videoSession = ThumbnailSession(cache: cache,
+            resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
+            generate: { _ in try await videoWork.run() }, disconnect: {})
+        let staleVideo = Task { try await videoSession.imageKey(id: video.id, libraryID: libraryID) }
+        await wait { await videoWork.waiting }
+        let videoScan = try await repo.begin(settings: settings)
+        try await repo.ingest([ScannedMedia(path: "b.mov", size: 201, creation: date, modified: date)], ticket: videoScan, progress: .init())
+        _ = try await repo.finish(videoScan, progress: .init(), completed: false)
+        await videoWork.release()
+        check(try await staleVideo.value == nil)
+        let currentVideo = try await repo.thumbnailTarget(id: video.id, libraryID: libraryID)!
+        check(currentVideo.key != videoTarget.key)
+        let videoRequest = Task { try await videoSession.imageKey(id: video.id, libraryID: libraryID) }
+        await wait { await videoWork.waiting }; await videoWork.release()
+        check(try await videoRequest.value == currentVideo.key)
+        let cachedVideo = videoSession.cachedImage(for: currentVideo.key)
+        await videoWork.failing()
+        videoSession.setEditing(true)
+        check(try await videoSession.imageKey(id: video.id, libraryID: libraryID) == currentVideo.key)
+        check(videoSession.cachedImage(for: currentVideo.key) === cachedVideo)
+        check(await videoWork.started == 2)
+        // memoryが空の新sessionでもoffline disk cacheを利用し、generatorを呼ばない。
+        let offlineVideo = ThumbnailSession(cache: cache,
+            resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
+            generate: { _ in preconditionFailure("video disk hit reached generator") }, disconnect: {})
+        check(try await offlineVideo.imageKey(id: video.id, libraryID: libraryID) == currentVideo.key)
+        check(try await timeline.page(libraryID: libraryID).items.count == 2)
         // 設定Controllerのhook順序・失敗保持・保存成功・未保存終了。
         let defaults = UserDefaults(suiteName: "PhotoJot.ThumbnailSettings.\(UUID())")!
         defaults.set(try JSONEncoder().encode(settings), forKey: SMBConnectionSettings.storageKey)

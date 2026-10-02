@@ -68,7 +68,7 @@ actor SMBAccessCoordinator {
         catch { throw Self.failure(error, stage: "接続確認") }
     }
 
-    func photoThumbnail(target: PhotoThumbnailTarget, password: String) async throws -> Data {
+    func thumbnail(target: MediaThumbnailTarget, password: String) async throws -> Data {
         try await withClient(settings: target.settings, password: password) { client in
             guard target.fileSize > 0, !target.path.hasPrefix("/"),
                   !target.path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").contains("..") else {
@@ -79,9 +79,17 @@ actor SMBAccessCoordinator {
                 let size = try await reader.fileSize
                 try Task.checkCancellation()
                 guard size == UInt64(target.fileSize) else { throw IndexFailure.invalidState }
-                let source = SMBPhotoReader(reader: reader)
-                let data = try await PhotoThumbnailGenerator.generate(format: target.fileExtension, size: size) {
-                    try await source.read(offset: $0, count: $1)
+                let source = SMBThumbnailReader(reader: reader)
+                let data: Data
+                if VideoThumbnailPolicy.supports(target.fileExtension) {
+                    // reader/sessionを共有するため、全rangeのdrainまで同じSMB枠を保持。
+                    data = try await VideoThumbnailGenerator.generate(format: target.fileExtension, size: size) {
+                        try await source.read(offset: $0, count: $1)
+                    }
+                } else {
+                    data = try await PhotoThumbnailGenerator.generate(format: target.fileExtension, size: size) {
+                        try await source.read(offset: $0, count: $1)
+                    }
                 }
                 try await reader.close()
                 try Task.checkCancellation()
@@ -263,7 +271,7 @@ actor SMBAccessCoordinator {
 
 // Coordinatorの排他枠内でのみ作成し、生成器の逐次readだけへ渡す。
 // FileReaderを他のTaskへ共有せず、generatorが戻ってからcloseする。
-nonisolated private final class SMBPhotoReader: @unchecked Sendable {
+nonisolated private final class SMBThumbnailReader: @unchecked Sendable {
     let reader: FileReader
     init(reader: FileReader) { self.reader = reader }
     func read(offset: UInt64, count: Int) async throws -> Data {

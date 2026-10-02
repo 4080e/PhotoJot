@@ -29,13 +29,13 @@ actor MetadataFixture {
         let access = SMBAccessCoordinator()
         var settings = SMBConnectionSettings(); settings.host = "test"; settings.share = "photos"; settings.rootPath = "scan"
         let key = ThumbnailKey(libraryID: UUID(), mediaEntryID: UUID(), generation: UUID(), specificationVersion: PhotoThumbnailPolicy.version, pixelSize: 300)
-        let target = PhotoThumbnailTarget(key: key, path: "photo.jpg", fileSize: Int64(data.length), fileExtension: "jpg", settings: settings)
+        let target = MediaThumbnailTarget(key: key, path: "photo.jpg", fileSize: Int64(data.length), fileExtension: "jpg", settings: settings)
         let metadata = MetadataFixture(.init(id: UUID(), libraryID: key.libraryID, generation: UUID(),
             file: .init(path: "metadata.jpg", size: Int64(data.length), creation: .distantPast, modified: .distantPast)))
         await server.configure(data as Data, blocked: ["list:scan", "read:photo.jpg", "close:photo.jpg"])
         let scan = Task { try await access.scan(settings: settings, password: "secret", consume: { _,_ in }) }
         await wait { await server.waiting("list:scan") }
-        let photo = Task { try await access.photoThumbnail(target: target, password: "secret") }
+        let photo = Task { try await access.thumbnail(target: target, password: "secret") }
         await wait { await access.waitingOperationCount == 1 }
         let parse = Task { try await access.completeMetadata(settings: settings, password: "secret",
             next: { await metadata.next() }, save: { await metadata.save($0) }) }
@@ -61,13 +61,13 @@ actor MetadataFixture {
         check(events.firstIndex(of: "open:metadata.jpg")! < events.firstIndex(of: "list:scan/child")!)
         check(await server.maximumInFlight == 1)
         // Foreground retry can generate after cancellation cleanup and connection check.
-        let result = try await access.photoThumbnail(target: target, password: "secret")
+        let result = try await access.thumbnail(target: target, password: "secret")
         check(CGImageSourceCreateWithData(result as CFData, nil) != nil)
         await access.disconnectWhenAvailable()
 
         // Cancellation of a queued operation never releases the active owner's slot.
         await server.configure(data as Data, blocked: ["read:photo.jpg"])
-        let active = Task { try await access.photoThumbnail(target: target, password: "secret") }
+        let active = Task { try await access.thumbnail(target: target, password: "secret") }
         await wait { await server.waiting("read:photo.jpg") }
         let cancelledScan = Task { try await access.scan(settings: settings, password: "secret", consume: { _,_ in }) }
         await wait { await access.waitingOperationCount == 1 }
@@ -89,8 +89,31 @@ actor MetadataFixture {
             preconditionFailure("close failure")
         } catch MetadataServiceError.interruptedRead { }
         check(await retryMetadata.saved == 1)
-        _ = try await access.photoThumbnail(target: target, password: "secret")
+        _ = try await access.thumbnail(target: target, password: "secret")
         check(await server.events.filter { $0 == "connect" }.count == 2)
+        await access.disconnectWhenAvailable()
+        // 本物のAVAsset loaderからmock SMB APIへrange要求を送り、closeまで枠を保持。
+        let movie = try await VideoThumbnailFixture.make()
+        let videoKey = ThumbnailKey(libraryID: key.libraryID, mediaEntryID: UUID(), generation: UUID(),
+            specificationVersion: VideoThumbnailPolicy.version, pixelSize: 300)
+        let videoTarget = MediaThumbnailTarget(key: videoKey, path: "video.mov", fileSize: Int64(movie.count), fileExtension: "mov", settings: settings)
+        await server.configure(movie, blocked: ["read:video.mov", "close:video.mov"])
+        let video = Task { try await access.thumbnail(target: videoTarget, password: "secret") }
+        await wait { await server.waiting("read:video.mov") }
+        let afterVideo = Task { try await access.scan(settings: settings, password: "secret", consume: { _,_ in }) }
+        await wait { await access.waitingOperationCount == 1 }
+        video.cancel()
+        check(!(await server.events.contains("list:scan")))
+        await server.release("read:video.mov")
+        await wait { await server.waiting("close:video.mov") }
+        check(await access.waitingOperationCount == 1)
+        await server.release("close:video.mov")
+        do { _ = try await video.value; preconditionFailure("video cancel") } catch is CancellationError { }
+        _ = try await afterVideo.value
+        check(await server.maximumInFlight == 1)
+        check(await server.events.filter { $0 == "read:video.mov" }.count == 1)
+        let poster = try await access.thumbnail(target: videoTarget, password: "secret")
+        check(CGImageSourceCreateWithData(poster as CFData, nil) != nil)
         await access.disconnectWhenAvailable()
         print("PASS: real coordinator with test SMB API: scan/thumbnail/metadata FIFO, close-before-handoff, connection check contention, cancelled queued scan, retry, no concurrent SMB calls")
     }

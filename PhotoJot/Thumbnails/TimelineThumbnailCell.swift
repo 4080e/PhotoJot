@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct PhotoThumbnailCell: View {
+struct TimelineThumbnailCell: View {
     let item: TimelineItem
     let session: ThumbnailSession
     @State private var accepted: Accepted?
@@ -12,6 +12,7 @@ struct PhotoThumbnailCell: View {
         let generation: UUID
         let revision: Int
     }
+    private var isVideo: Bool { item.mediaType == "video" }
     private var request: RequestID { RequestID(generation: item.generation, revision: session.revision) }
     private var image: CGImage? {
         guard let accepted, accepted.request == request else { return nil }
@@ -26,12 +27,20 @@ struct PhotoThumbnailCell: View {
                         .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                 }
             } else {
-                Image(systemName: "photo").font(.title2).foregroundStyle(.secondary)
+                Image(systemName: isVideo ? "video.fill" : "photo").font(.title2).foregroundStyle(.secondary)
             }
         }
         .aspectRatio(1, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .accessibilityLabel("写真")
+        .overlay(alignment: .bottomTrailing) {
+            if isVideo, image != nil {
+                Image(systemName: "video.fill")
+                    .font(.caption2).foregroundStyle(.white)
+                    .padding(4).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
+                    .padding(4).accessibilityHidden(true)
+            }
+        }
+        .accessibilityLabel(isVideo ? "動画" : "写真")
         .task(id: request) {
             let requested = request
             do {

@@ -11,7 +11,8 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   PhotoJot/Timeline/TimelineDate.swift PhotoJot/Timeline/TimelineRepository.swift PhotoJot/Timeline/TimelineController.swift \
   PhotoJot/Metadata/MetadataProgress.swift PhotoJot/Update/UpdateCheckpoint.swift PhotoJot/Update/LibraryUpdateController.swift PhotoJot/Settings/ConnectionSettingsController.swift PhotoJot/Thumbnails/ThumbnailKey.swift PhotoJot/Thumbnails/ThumbnailCache.swift \
   PhotoJot/Thumbnails/ThumbnailService.swift PhotoJot/Thumbnails/ThumbnailSession.swift PhotoJot/Thumbnails/ThumbnailMemoryCache.swift \
-  PhotoJot/Thumbnails/ThumbnailRepository.swift PhotoJot/Thumbnails/PhotoThumbnailGenerator.swift \
+  PhotoJot/Thumbnails/ThumbnailRepository.swift PhotoJot/Thumbnails/PhotoThumbnailGenerator.swift PhotoJot/Thumbnails/VideoThumbnailGenerator.swift \
+  PhotoJot/Thumbnails/RangeThumbnailCore.swift PhotoJot/Thumbnails/RangeThumbnailLoader.swift \
   PhotoJot/Thumbnails/JPEGThumbnailLocator.swift PhotoJot/Thumbnails/ThumbnailImages.swift \
   Tests/ThumbnailIntegrationChecks.swift -o "$check_dir/checks"
 "$check_dir/checks" "$check_dir/files"
