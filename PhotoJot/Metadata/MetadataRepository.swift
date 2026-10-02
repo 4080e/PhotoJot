@@ -78,13 +78,25 @@ extension MediaRepository {
         let ids = updates.map { $0.target.id }
         let entries = try context.fetch(FetchDescriptor<MediaEntry>(predicate: #Predicate { ids.contains($0.id) }))
         let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        var completedSequences: [UUID: Int64] = [:]
+        for id in Set(updates.map { $0.target.libraryID }) {
+            completedSequences[id] = try metadataLibrary(id, context: context).completedScanSequence
+        }
+        var changedLibraries = Set<UUID>()
         for update in updates {
             let target = update.target
             guard let entry = byID[target.id], entry.libraryID == target.libraryID,
                   entry.generation == target.generation, entry.pathKey == target.file.pathKey else {
                 throw MetadataServiceError.staleIndex
             }
-            defer { TimelineDates.apply(to: entry) }
+            guard let completed = completedSequences[entry.libraryID] else { throw MetadataServiceError.noLibrary }
+            let before = timelineItem(entry, completed: completed)
+            defer {
+                TimelineDates.apply(to: entry)
+                if before != timelineItem(entry, completed: completed) {
+                    changedLibraries.insert(entry.libraryID)
+                }
+            }
             entry.clearMetadata()
             let outcome = update.outcome, result = outcome.resolution
             entry.metadataState = outcome.state
@@ -102,7 +114,7 @@ extension MediaRepository {
             entry.metadataGeneration = target.generation; entry.metadataVersion = version
             entry.metadataCompletedAt = Date()
         }
-        for libraryID in Set(updates.map { $0.target.libraryID }) {
+        for libraryID in changedLibraries {
             try advanceTimelineRevision(libraryID, context: context)
         }
         try Task.checkCancellation()

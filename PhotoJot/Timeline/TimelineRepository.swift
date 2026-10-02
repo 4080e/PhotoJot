@@ -1,7 +1,7 @@
 import Foundation
 import SwiftData
 
-nonisolated struct TimelineItem: Sendable, Identifiable {
+nonisolated struct TimelineItem: Sendable, Identifiable, Equatable {
     let id: UUID
     let libraryID: UUID
     let relativePath: String
@@ -101,6 +101,17 @@ extension MediaRepository {
         library.timelineRevision = (library.timelineRevision ?? 0) + 1
     }
 
+    // 保存前後でUIへ渡す値を比較する。走査sequence・診断文・処理完了時刻は含めない。
+    func timelineItem(_ entry: MediaEntry, completed: Int64) -> TimelineItem? {
+        guard !entry.isMissing(completedScanSequence: completed),
+              ScannedMedia.isSupported(entry.relativePath),
+              entry.timelineKeyVersion == TimelinePolicy.version, !entry.timelineSortKey.isEmpty else { return nil }
+        return TimelineItem(id: entry.id, libraryID: entry.libraryID, relativePath: entry.relativePath,
+                            mediaType: entry.mediaType, fileExtension: entry.fileExtension, generation: entry.generation,
+                            date: TimelineDates.resolve(entry), sortKey: entry.timelineSortKey,
+                            metadataState: entry.metadataState, metadataIsCurrent: TimelineDates.hasCurrentMetadata(entry))
+    }
+
     private func unpreparedTimeline(_ libraryID: UUID) -> FetchDescriptor<MediaEntry> {
         let version = TimelinePolicy.version
         return FetchDescriptor<MediaEntry>(predicate: #Predicate {
@@ -124,8 +135,13 @@ extension MediaRepository {
             try context.save()
             return 0
         }
-        for entry in entries { TimelineDates.apply(to: entry) }
-        try advanceTimelineRevision(libraryID, context: context)
+        var changed = false
+        for entry in entries {
+            let before = timelineItem(entry, completed: library.completedScanSequence)
+            TimelineDates.apply(to: entry)
+            if before != timelineItem(entry, completed: library.completedScanSequence) { changed = true }
+        }
+        if changed { try advanceTimelineRevision(libraryID, context: context) }
         try Task.checkCancellation()
         try context.save()
         return entries.count

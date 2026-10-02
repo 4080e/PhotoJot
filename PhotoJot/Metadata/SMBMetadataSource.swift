@@ -42,7 +42,11 @@ nonisolated final class SMBMetadataSource: MetadataRangeSource {
             let chunk: Data
             do { chunk = try await reader.read(offset: offset + UInt64(data.count), length: UInt32(count)) }
             catch is CancellationError { throw CancellationError() }
-            catch { throw MetadataFailure.smb("SMB range read失敗") }
+            catch {
+                try Task.checkCancellation()
+                throw MetadataFailure.smb("SMB range read失敗")
+            }
+            try Task.checkCancellation()
             guard !chunk.isEmpty, chunk.count <= count else { throw MetadataFailure.smb("短いEOF／応答長不正") }
             if kind == .management { managementBytes += chunk.count } else { exifBytes += chunk.count }
             data.append(chunk)

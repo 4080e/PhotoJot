@@ -1,9 +1,13 @@
 import SwiftUI
 
 struct TimelineView: View {
-    @State private var model = TimelineController()
+    @State private var model: TimelineController
     @State private var selectedItem: TimelineItem?
     private let columns = [GridItem(.adaptive(minimum: 88), spacing: 8)]
+
+    init(repository: TimelineRepository) {
+        _model = State(initialValue: TimelineController(source: .savedIndex(repository: repository)))
+    }
 
     var body: some View {
         Group {

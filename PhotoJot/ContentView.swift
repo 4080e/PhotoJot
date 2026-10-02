@@ -1,25 +1,31 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var scan = ScanController()
-    @State private var metadata = MetadataController()
-    @State private var timelineDiagnostics = TimelineDiagnosticsController()
+    let update: LibraryUpdateController
+    let coordinator: SMBAccessCoordinator
+    let timelineRepository: TimelineRepository
+    @State private var timelineDiagnostics: TimelineDiagnosticsController
     @State private var settings = SMBConnectionSettings()
     @State private var password = ""
     @State private var isChecking = false
     @State private var message: String?
     @State private var succeeded = false
     @State private var didLoad = false
-    @State private var coordinator = SMBAccessCoordinator()
     private let credentials = CredentialStore()
+
+    init(update: LibraryUpdateController, coordinator: SMBAccessCoordinator, timelineRepository: TimelineRepository) {
+        self.update = update
+        self.coordinator = coordinator
+        self.timelineRepository = timelineRepository
+        _timelineDiagnostics = State(initialValue: TimelineDiagnosticsController(repository: timelineRepository))
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     NavigationLink {
-                        TimelineView()
+                        TimelineView(repository: timelineRepository)
                     } label: {
                         Label("timelineを開く", systemImage: "photo.on.rectangle")
                     }
@@ -58,7 +64,7 @@ struct ContentView: View {
                         .disabled(isChecking)
                     }
                 }
-                .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
+                .disabled(isChecking || update.isRunning || timelineDiagnostics.isRunning)
                 if let message {
                     Section("確認結果") {
                         Label(message, systemImage: succeeded ? "checkmark.circle" : "exclamationmark.circle")
@@ -66,45 +72,41 @@ struct ContentView: View {
                     }
                 }
                 Section {
-                    Button("保存済みの接続先を走査") { scan.start(access: coordinator) }
-                        .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
-                    if scan.isScanning {
-                        ProgressView("走査中")
-                        Button("中断", role: .cancel) { scan.cancel() }
+                    Button(update.state == .cancelling ? "中断後に更新" : "保存済みの接続先を更新") { update.requestUpdate() }
+                        .disabled(isChecking || update.state == .running || update.restartRequested || timelineDiagnostics.isRunning)
+                    if update.isRunning {
+                        ProgressView(update.state == .cancelling ? "中断待ち…" :
+                            (update.phase == .metadata ? "撮影日時を解析中…" : "走査中…"))
+                        Button("中断", role: .cancel) { update.cancel() }
                     }
-                    if let name = scan.libraryName { Text(name).foregroundStyle(.secondary) }
-                    if let status = scan.status {
-                        Text(status)
-                        Text("対象メディア：\(scan.progress.media)件")
-                        Text("ファイル：\(scan.progress.files)件・フォルダ：\(scan.progress.folders)件")
+                    if let name = update.libraryName { Text(name).foregroundStyle(.secondary) }
+                    if update.restartRequested { Text("中断処理の終了後に更新を再開します。") }
+                    if update.state != .idle {
+                        Text("対象メディア：\(update.scanProgress.media)件")
+                        Text("ファイル：\(update.scanProgress.files)件・フォルダ：\(update.scanProgress.folders)件")
                             .foregroundStyle(.secondary)
                     }
+                    if let missing = update.missingCount { Text("未確認（missing）：\(missing)件") }
+                    if let error = update.errorMessage { Text(error).foregroundStyle(.red) }
+                    if update.state == .completed { Text("更新が完了しました。") }
+                    if update.state == .cancelled { Text("更新を中断しました。保存済みの結果は残ります。") }
                 } header: {
                     Text("ライブラリの走査")
                 } footer: {
-                    Text("最後に接続確認で保存した共有・ルートを走査します。画面の未保存の変更は使用しません。")
+                    Text("保存済みの共有・ルートを走査した後、撮影日時を解析します。画面の未保存の変更は使用しません。")
                 }
                 Section {
-                    Button("撮影日時を解析") { metadata.start(access: coordinator) }
-                        .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
-                    if metadata.isProcessing {
-                        ProgressView("解析中")
-                        Button("解析を中断", role: .cancel) { metadata.cancel() }
-                    }
-                    if let status = metadata.status {
-                        Text(status)
-                        Text("処理済み：\(metadata.progress.completed) / \(metadata.progress.total)件")
-                        Text("今回の解析で日時不明：\(metadata.progress.unknown)件")
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("処理済み：\(update.metadataProgress.completed) / \(update.metadataProgress.total)件")
+                    Text("今回の解析で日時不明：\(update.metadataProgress.unknown)件")
+                        .foregroundStyle(.secondary)
                 } header: {
                     Text("撮影日時")
                 } footer: {
-                    Text("保存済みの接続先のindexを使用します。未処理・更新されたメディアを解析し、取得できない場合はファイルの日時を使用します。")
+                    Text("未処理・更新されたメディアを解析し、取得できない場合はファイルの日時を使用します。")
                 }
                 Section {
                     Button("timeline診断（ローカルのみ）") { timelineDiagnostics.start() }
-                        .disabled(isChecking || scan.isScanning || metadata.isProcessing || timelineDiagnostics.isRunning)
+                        .disabled(isChecking || update.isRunning || timelineDiagnostics.isRunning)
                     if timelineDiagnostics.isRunning {
                         ProgressView("日付キー構築・集計中")
                         Button("診断を中断", role: .cancel) { timelineDiagnostics.cancel() }
@@ -135,9 +137,6 @@ struct ContentView: View {
             .autocorrectionDisabled()
             .navigationTitle("PhotoJot")
             .onAppear(perform: loadSettings)
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .background { scan.cancel(); metadata.cancel(); timelineDiagnostics.cancel() }
-            }
             .onChange(of: settings) { old, new in
                 message = nil
                 if old.credentialAccount != new.credentialAccount { loadPassword() }
@@ -193,8 +192,4 @@ struct ContentView: View {
             message = error.localizedDescription
         }
     }
-}
-
-#Preview {
-    ContentView()
 }

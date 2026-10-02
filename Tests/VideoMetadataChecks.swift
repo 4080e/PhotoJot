@@ -7,8 +7,10 @@ nonisolated final class VideoMemorySource: MetadataRangeSource {
     var requests: [(UInt64, Int)] = []
     var shortReads = false
     var fails = false
+    var cancelAtRead: Int?
     init(_ data: Data) { self.data = data }
     func read(offset: UInt64, length: Int, kind: MetadataReadKind, purpose: String) async throws -> Data {
+        if cancelAtRead == requests.count { throw CancellationError() }
         if fails { throw VideoFailure.smb("synthetic") }
         guard offset <= size, length >= 0, UInt64(length) <= size - offset else { throw VideoFailure.smb("範囲外") }
         let count = shortReads ? min(3, length) : length
@@ -52,21 +54,31 @@ nonisolated final class VideoMemorySource: MetadataRangeSource {
         let mdat = box("mdat", Data(repeating: 0xCC, count: 10000), extended: extended, zero: zero)
         return ftyp + box("wide", Data()) + (after ? mdat + moov : moov + mdat)
     }
-    static func parse(_ data: Data, short: Bool = false) async -> (VideoMetadata, VideoRangeReader, VideoMemorySource) {
+    static func parse(_ data: Data, short: Bool = false) async throws -> (VideoMetadata, VideoRangeReader, VideoMemorySource) {
         let source = VideoMemorySource(data); source.shortReads = short
         let reader = VideoRangeReader(source)
         // 使用したreaderを返し、転送量と全要求を検査する。
         let actual = LimitedVideoParser(reader)
-        await actual.inspect()
+        try await actual.inspect()
         return (actual.metadata, reader, source)
     }
     static func main() async throws {
+        let cancellationFile = file(meta: meta())
+        let (_, _, baseline) = try await parse(cancellationFile)
+        for readIndex in baseline.requests.indices {
+            let source = VideoMemorySource(cancellationFile)
+            source.cancelAtRead = readIndex
+            let parser = LimitedVideoParser(VideoRangeReader(source))
+            do { try await parser.inspect(); fatalError("video parser swallowed cancellation at read \(readIndex)") }
+            catch is CancellationError { }
+            check(!parser.metadata.unclassifiedFailure && !parser.metadata.transportFailure, "キャンセルを解析・通信失敗にしない")
+        }
         for iso in [false, true] {
             for version: UInt64 in [0, 1] {
                 for after in [false, true] {
                     for extended in [false, true] {
                         for index in [1, 4] {
-                            let (m, r, s) = await parse(file(meta: meta(iso: iso, keyIndex: index, extended: extended), version: version, after: after, extended: extended, udta: iso))
+                            let (m, r, s) = try await parse(file(meta: meta(iso: iso, keyIndex: index, extended: extended), version: version, after: after, extended: extended, udta: iso))
                             check(m.completed && !m.failed && !m.unsupported, "正常32/64bit・QT/ISO・udta")
                             check(m.dates.count == 1 && m.dates[0].keyIndex == UInt64(index) && m.dates[0].locale == 99, "可変キー番号・locale")
                             check(m.dates[0].offset == "+0900" && m.dates[0].date != nil, "日時と元offset保持")
@@ -80,28 +92,28 @@ nonisolated final class VideoMemorySource: MetadataRangeSource {
                 }
             }
         }
-        let (zero, _, _) = await parse(file(meta: meta(), zero: true))
+        let (zero, _, _) = try await parse(file(meta: meta(), zero: true))
         check(zero.completed && zero.hasCreation, "top-level size0 mdat")
-        let (short, _, _) = await parse(file(meta: meta()), short: true)
+        let (short, _, _) = try await parse(file(meta: meta()), short: true)
         check(short.hasCreation && !short.failed, "短いreadを不足分のみ追加")
-        let (missing, _, _) = await parse(file(meta: meta(missing: true)))
+        let (missing, _, _) = try await parse(file(meta: meta(missing: true)))
         check(missing.completed && !missing.hasCreation && missing.mvhdDate != nil && !missing.failed, "creationdate欠落")
-        let (dup, _, _) = await parse(file(meta: meta(duplicate: true)))
+        let (dup, _, _) = try await parse(file(meta: meta(duplicate: true)))
         check(dup.dates.count == 2 && dup.issues.contains { $0.contains("値が異なる") }, "複数値を保持")
         for bad in ["count", "keysize", "index", "data", "child", "type"] {
-            let (m, _, _) = await parse(file(meta: meta(bad: bad)))
+            let (m, _, _) = try await parse(file(meta: meta(bad: bad)))
             check(m.failed || m.unsupported || m.limited, "不正keys/ilst/data/meta: \(bad)")
             check(m.mvhdDate != nil, "metadata不正でもmvhd観察")
         }
         for size: UInt64 in [2, 7, UInt64(UInt32.max)] {
             var d = file(meta: meta()); d.replaceSubrange(0..<4, with: n(size, 4))
-            let (m, _, _) = await parse(d)
+            let (m, _, _) = try await parse(d)
             check(m.failed, "不正box size")
         }
-        let (overflow, _, _) = await parse(n(1, 4) + Data("moov".utf8) + n(UInt64.max, 8) + Data(repeating: 0, count: 30))
+        let (overflow, _, _) = try await parse(n(1, 4) + Data("moov".utf8) + n(UInt64.max, 8) + Data(repeating: 0, count: 30))
         check(overflow.failed, "64bit size overflow／範囲外")
         let huge = box("meta", Data(repeating: 0, count: 1024 * 1024 + 1))
-        let (limit, limitReader, _) = await parse(file(meta: huge))
+        let (limit, limitReader, _) = try await parse(file(meta: huge))
         check(limit.limited && limitReader.bytes < 1000, "meta上限：payload前に停止")
         let source = VideoMemorySource(Data(repeating: 0, count: 3 * 1024 * 1024))
         let budget = VideoRangeReader(source)
@@ -127,12 +139,12 @@ nonisolated final class VideoMemorySource: MetadataRangeSource {
             catch VideoFailure.corrupt { check(true, "mvhd無効値") }
         }
         let unknownVersion = box("moov", mvhd(2) + meta()) + box("mdat", Data(repeating: 0, count: 100))
-        let (version, _, _) = await parse(unknownVersion)
+        let (version, _, _) = try await parse(unknownVersion)
         check(version.unsupported && version.hasCreation, "未知mvhdでもcreationdate観察")
         let sample = file(meta: meta())
         // 切断した管理情報の全境界でtrapを起こさない。
         for length in 0..<min(500, sample.count) {
-            let (m, _, _) = await parse(Data(sample.prefix(length)))
+            let (m, _, _) = try await parse(Data(sample.prefix(length)))
             check(!m.completed, "切断入力")
         }
         print("PASS: \(checks) video checks")

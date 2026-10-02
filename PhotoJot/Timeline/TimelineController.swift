@@ -11,17 +11,16 @@ nonisolated struct TimelinePageSource: Sendable {
              page: { try await repository.page(libraryID: $0, after: $1) })
     }
 
-    static func savedIndex() throws -> Self {
-        guard let data = UserDefaults.standard.data(forKey: SMBConnectionSettings.storageKey) else {
-            throw TimelineError.noLibrary
-        }
-        let settings = try JSONDecoder().decode(SMBConnectionSettings.self, from: data).validated()
-        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                                    appropriateFor: nil, create: true)
-            .appendingPathComponent("PhotoJot", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return try .local(repository: TimelineRepository(url: directory.appendingPathComponent("index.store")), settings: settings)
+    static func savedIndex(repository: TimelineRepository) -> Self {
+        Self(prepare: {
+            guard let data = UserDefaults.standard.data(forKey: SMBConnectionSettings.storageKey) else {
+                throw TimelineError.noLibrary
+            }
+            let settings = try JSONDecoder().decode(SMBConnectionSettings.self, from: data).validated()
+            return try await repository.prepare(settings: settings)
+        }, page: { try await repository.page(libraryID: $0, after: $1) })
     }
+
 }
 
 // 同じ暦日をoffsetによらず結合する。IDは先頭entryの安定ID。
@@ -42,14 +41,14 @@ nonisolated struct TimelinePageSource: Sendable {
     private(set) var errorMessage: String?
     private(set) var emptyMessage = "保存済みの対象メディアがありません。"
     private(set) var displayGeneration = UUID()
-    @ObservationIgnored private var source: TimelinePageSource?
+    @ObservationIgnored private let source: TimelinePageSource
     @ObservationIgnored private var libraryID: UUID?
     @ObservationIgnored private var cursor: TimelineCursor?
     @ObservationIgnored private var loadTriggerIDs: Set<UUID> = []
     // 次ページを促すのは取得済み末尾の少数件。page自体の件数はTimelinePolicyで管理。
     private static let nextPageThreshold = 20
 
-    init(source: TimelinePageSource? = nil) { self.source = source }
+    init(source: TimelinePageSource) { self.source = source }
 
     func loadInitial() async {
         guard !isLoading, !hasLoaded else { return }
@@ -75,7 +74,7 @@ nonisolated struct TimelinePageSource: Sendable {
     }
 
     private func loadNext() async {
-        guard !isLoading, hasMore, let source, let libraryID, let cursor else { return }
+        guard !isLoading, hasMore, let libraryID, let cursor else { return }
         // awaitより前に排他。高速スクロールからの重複triggerも同じcursorを二重取得しない。
         isLoading = true; errorMessage = nil
         defer { isLoading = false }
@@ -93,8 +92,6 @@ nonisolated struct TimelinePageSource: Sendable {
     }
 
     private func startFromBeginning(replacing: Bool = false) async throws {
-        if source == nil { source = try TimelinePageSource.savedIndex() }
-        guard let source else { throw TimelineError.noLibrary }
         let id = try await source.prepare()
         let page = try await source.page(id, nil)
         try Task.checkCancellation()

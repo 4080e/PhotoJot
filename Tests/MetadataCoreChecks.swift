@@ -6,10 +6,12 @@ nonisolated final class MetadataTestSource: MetadataRangeSource {
     let data: Data
     var size: UInt64 { UInt64(data.count) }
     var requests: [(UInt64, Int)] = []
+    var cancelRead = false
     var fail = false
     var parserLimit = false
     init(_ data: Data) { self.data = data }
     func read(offset: UInt64, length: Int, kind: MetadataReadKind, purpose: String) async throws -> Data {
+        if cancelRead { throw CancellationError() }
         if parserLimit { throw MetadataFailure.limit("fixture limit") }
         if fail { throw MetadataFailure.smb("fixture failure") }
         requests.append((offset, length))
@@ -81,6 +83,14 @@ nonisolated final class MetadataTestSource: MetadataRangeSource {
         }
         for kind in [DateDiagnosticKind.smb, .cleanup, .temporary] {
             precondition(MetadataCore.outcome(format: .heic, evidence: .init(diagnostics: [.init(kind: kind, message: "fixture")]), creation: nil, modified: nil).requiresRetry)
+        }
+        // Task自体が未キャンセルでも、sourceのCancellationErrorをretryへ変換しない。
+        for format in [MediaDateFormat.jpeg, .heic, .mov, .mp4] {
+            let cancelledSource = MetadataTestSource(late); cancelledSource.cancelRead = true
+            do {
+                _ = try await MetadataCore.parse(format: format, source: cancelledSource, creation: nil, modified: nil)
+                fatalError("CancellationError converted to metadata outcome")
+            } catch is CancellationError { }
         }
         let cancelled = Task {
             withUnsafeCurrentTask { $0?.cancel() }

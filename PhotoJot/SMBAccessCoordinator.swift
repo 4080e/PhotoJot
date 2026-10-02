@@ -33,8 +33,9 @@ actor SMBAccessCoordinator {
             try Task.checkCancellation()
             return entries.filter { $0.name != "." && $0.name != ".." }.count
         } catch is CancellationError {
-            throw AccessError(message: "接続確認を中止しました。")
+            throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             throw Self.failure(error, stage: stage)
         }
     }
@@ -60,19 +61,31 @@ actor SMBAccessCoordinator {
             try Task.checkCancellation()
             try await client.connectShare(settings.share)
         } catch is CancellationError { throw CancellationError() }
-        catch { throw Self.failure(error, stage: stage) }
+        catch {
+            try Task.checkCancellation()
+            throw Self.failure(error, stage: stage)
+        }
 
         var pending = [settings.rootPath]
         var batch: [ScannedMedia] = []
         var progress = ScanProgress()
         while let directory = pending.popLast() {
-            try Task.checkCancellation()
+            try await UpdateCheckpoint.yield()
             let entries: [File]
+            // SMBClient 0.3.1の一覧取得はTaskキャンセル非対応。応答後に必ず確認する。
             do { entries = try await client.listDirectory(path: directory) }
-            catch { throw Self.failure(error, stage: "フォルダの一覧取得") }
-            progress.folders += 1
-            for entry in entries where entry.name != "." && entry.name != ".." {
+            catch is CancellationError { throw CancellationError() }
+            catch {
                 try Task.checkCancellation()
+                throw Self.failure(error, stage: "フォルダの一覧取得")
+            }
+            try Task.checkCancellation()
+            progress.folders += 1
+            for (index, entry) in entries.enumerated() {
+                // 対象外ファイル・directory・dot entryも件数に含める。
+                if index % UpdateCheckpoint.listingInterval == 0 { try await UpdateCheckpoint.yield() }
+                try Task.checkCancellation()
+                if entry.name == "." || entry.name == ".." { continue }
                 let path = directory.isEmpty ? entry.name : directory + "/" + entry.name
                 if entry.isDirectory {
                     pending.append(path)
@@ -84,17 +97,21 @@ actor SMBAccessCoordinator {
                         batch.append(ScannedMedia(path: path, size: size,
                                                   creation: entry.creationTime, modified: entry.lastWriteTime))
                         if batch.count == MediaRepository.batchSize {
+                            try await UpdateCheckpoint.yield()
                             try await consume(batch, progress)
                             batch.removeAll(keepingCapacity: true)
+                            try await UpdateCheckpoint.yield()
                         }
                     }
                 }
             }
             // 対象メディアのないフォルダでも進捗とキャンセルを反映する。
+            try await UpdateCheckpoint.yield()
             try await consume([], progress)
         }
-        try Task.checkCancellation()
+        try await UpdateCheckpoint.yield()
         if !batch.isEmpty { try await consume(batch, progress) }
+        try await UpdateCheckpoint.yield()
         return progress
     }
 
@@ -114,28 +131,38 @@ actor SMBAccessCoordinator {
             try Task.checkCancellation()
             try await client.session.connect()
             stage = "認証"
+            try Task.checkCancellation()
             try await client.login(username: settings.username, password: password,
                                    domain: settings.domain.isEmpty ? nil : settings.domain)
             stage = "共有への接続"
             try Task.checkCancellation()
             try await client.connectShare(settings.share)
         } catch is CancellationError { throw CancellationError() }
-        catch { throw Self.failure(error, stage: stage) }
-        while true {
+        catch {
             try Task.checkCancellation()
+            throw Self.failure(error, stage: stage)
+        }
+        while true {
+            try await UpdateCheckpoint.yield()
             let targets = try await next()
+            try Task.checkCancellation()
             if targets.isEmpty { return }
             var updates: [MetadataUpdate] = []
             for target in targets {
-                try Task.checkCancellation()
+                try await UpdateCheckpoint.yield()
                 let outcome = try await readMetadata(client: client, target: target)
+                try await UpdateCheckpoint.yield()
                 updates.append(MetadataUpdate(target: target, outcome: outcome))
                 if outcome.requiresRetry {
+                    try await UpdateCheckpoint.yield()
                     try await save(updates)
+                    try await UpdateCheckpoint.yield()
                     throw MetadataServiceError.interruptedRead
                 }
             }
+            try await UpdateCheckpoint.yield()
             try await save(updates)
+            try await UpdateCheckpoint.yield()
         }
     }
 
@@ -146,6 +173,7 @@ actor SMBAccessCoordinator {
         var outcome: MetadataOutcome
         do {
             let size = try await file.fileSize
+            try Task.checkCancellation()
             if size != UInt64(target.file.size) {
                 outcome = MetadataCore.outcome(format: format,
                     evidence: .init(diagnostics: [.init(kind: .temporary, message: "index取得後にサイズが変化。再走査が必要")]),
@@ -163,6 +191,7 @@ actor SMBAccessCoordinator {
                 evidence: .init(diagnostics: [.init(kind: .smb, message: "SMB open/read失敗")]), creation: nil, modified: nil)
         }
         do { try await file.close() }
+        catch is CancellationError { throw CancellationError() }
         catch {
             outcome = MetadataCore.outcome(format: format,
                 evidence: .init(diagnostics: [.init(kind: .cleanup, message: "SMB close失敗")]), creation: nil, modified: nil)

@@ -7,7 +7,9 @@ import Observation
     var status: String?
     var result: TimelineDiagnostics?
     private var task: Task<Void, Never>?
-    private var repository: TimelineRepository?
+    private let repository: TimelineRepository
+
+    init(repository: TimelineRepository) { self.repository = repository }
 
     func start() {
         guard !isRunning else { return }
@@ -19,14 +21,6 @@ import Observation
                     throw ScanFailure.noSettings
                 }
                 let settings = try JSONDecoder().decode(SMBConnectionSettings.self, from: data).validated()
-                if repository == nil {
-                    let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                                                appropriateFor: nil, create: true)
-                        .appendingPathComponent("PhotoJot", isDirectory: true)
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                    repository = try TimelineRepository(url: directory.appendingPathComponent("index.store"))
-                }
-                guard let repository else { throw IndexFailure.invalidState }
                 result = try await repository.diagnostics(settings: settings) { [weak self] count in
                     await self?.update(count)
                 }

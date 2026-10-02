@@ -1,20 +1,14 @@
 import Foundation
 
-nonisolated struct MetadataProgress: Sendable {
-    var total = 0
-    var completed = 0
-    var unknown = 0
-}
-
 actor MetadataService {
     private let repository: MediaRepository
     private let access: SMBAccessCoordinator
     private var active = false
     private var counts = MetadataProgress()
 
-    init(access: SMBAccessCoordinator, storeURL: URL) throws {
+    init(access: SMBAccessCoordinator, repository: MediaRepository) {
         self.access = access
-        repository = try MediaRepository(url: storeURL)
+        self.repository = repository
     }
 
     func complete(settings: SMBConnectionSettings, password: String,

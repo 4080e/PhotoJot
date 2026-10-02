@@ -27,7 +27,7 @@ nonisolated enum MetadataCore {
                 evidence.exif = try LimitedExifParser.parse(item: await plan.readExif(from: source))
             case .mov, .mp4:
                 let parser = LimitedVideoParser(VideoRangeReader(source))
-                await parser.inspect()
+                try await parser.inspect()
                 try Task.checkCancellation()
                 let metadata = parser.metadata
                 evidence.video = metadata

@@ -247,12 +247,13 @@ nonisolated final class LimitedVideoParser {
     }
     // 非対応／不正な個別metadataでも他方の日時を観察。通信・資源上限エラーは直ちに終了。
     private func componentError(_ error: Error) throws {
+        if error is CancellationError { throw CancellationError() }
         if let e = error as? VideoFailure {
             switch e { case .limit, .smb: throw e; default: break }
         }
         record(error)
     }
-    func inspect() async {
+    func inspect() async throws {
         do {
             let root = try await remoteChildren(0, reader.size, "top-level header", top: true)
             metadata.mdats = root.filter { $0.type == Self.code("mdat") }
@@ -289,7 +290,8 @@ nonisolated final class LimitedVideoParser {
             let values = Set(metadata.dates.compactMap(\.raw))
             if metadata.dates.count > 1 { metadata.issues.append(values.count > 1 ? "複数creationdate：値が異なる（自動採用なし）" : "複数creationdate：同じ値（全候補を表示）") }
             metadata.completed = true
-        } catch { record(error) }
+        } catch is CancellationError { throw CancellationError() }
+        catch { record(error) }
     }
     private func movieHeader(_ box: VideoBox) async throws {
         guard box.end - box.payload >= 4 else { throw VideoFailure.corrupt("mvhd FullBox不足") }

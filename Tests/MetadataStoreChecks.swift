@@ -96,6 +96,38 @@ private func check(_ value: @autoclosure () throws -> Bool) throws { let result 
         }
         let final = try await repository.selectMetadata(settings: settings)
         try check(final.count == 0)
+        let resumeFiles = (0..<201).map { file("resume/\($0).jpg") }
+        let resumeRun = try await repository.begin(settings: settings)
+        try await repository.ingest(resumeFiles, ticket: resumeRun, progress: .init())
+        _ = try await repository.finish(resumeRun, progress: .init(), completed: true)
+        let savedBatch = try await repository.metadataBatch(libraryID: selection.libraryID)
+        try await repository.saveMetadata(savedBatch.map { MetadataUpdate(target: $0, outcome: complete) })
+        let unsavedBatch = try await repository.metadataBatch(libraryID: selection.libraryID)
+        let stop = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                try await repository.saveMetadata(unsavedBatch.map { MetadataUpdate(target: $0, outcome: complete) })
+                fatalError("cancelled metadata batch saved")
+            } catch is CancellationError { }
+        }
+        try await stop.value
+        let reopened = try MediaRepository(url: url)
+        let pendingAfterStop = try await reopened.selectMetadata(settings: settings)
+        try check(pendingAfterStop.count == 101)
+        let savedIDs = Set(savedBatch.map(\.id))
+        try check(try rows().filter { savedIDs.contains($0.id) && $0.metadataCompletedAt != nil }.count == 100)
+        // 次回更新は全件再走査しても、保存済み結果を保持して未完了分だけ選択する。
+        let rescan = try await reopened.begin(settings: settings)
+        try await reopened.ingest(resumeFiles, ticket: rescan, progress: .init())
+        _ = try await reopened.finish(rescan, progress: .init(), completed: true)
+        for expected in [100, 1] {
+            let batch = try await reopened.metadataBatch(libraryID: selection.libraryID)
+            try check(batch.count == expected && batch.allSatisfy { !savedIDs.contains($0.id) })
+            try await reopened.saveMetadata(batch.map { MetadataUpdate(target: $0, outcome: complete) })
+        }
+        let resumed = try await reopened.selectMetadata(settings: settings)
+        try check(resumed.count == 0)
+        print("PASS: metadata saved batch retained, 101 pending after cancellation/reopen, rescan resumes pending only")
         print("Metadata store checks passed (stage2 migration, pending predicate, terminal skip, retry, generation/version, stale rejection, floating persistence, present-only, PNG, batch100+tail, cancellation)")
     }
 }

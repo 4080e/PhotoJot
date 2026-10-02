@@ -54,6 +54,10 @@ actor MediaRepository {
         }
         let context = context(), libraryID = ticket.libraryID
         let run = try run(ticket, in: context)
+        guard let library = try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.id == libraryID })).first else {
+            throw IndexFailure.invalidState
+        }
+        var timelineChanged = false
         let keys = values.map(\.pathKey)
         let existing = try context.fetch(FetchDescriptor<MediaEntry>(predicate: #Predicate {
             $0.libraryID == libraryID && keys.contains($0.pathKey)
@@ -61,6 +65,7 @@ actor MediaRepository {
         var byKey = Dictionary(uniqueKeysWithValues: existing.map { ($0.pathKey, $0) })
         for file in values {
             if let entry = byKey[file.pathKey] {
+                let before = timelineItem(entry, completed: library.completedScanSequence)
                 let changed = entry.fileSize != file.size || entry.smbCreationTime != file.creation || entry.smbLastWriteTime != file.modified
                 if entry.lastSeenScanID == run.id && changed { throw IndexFailure.conflictingObservation }
                 if changed {
@@ -72,13 +77,15 @@ actor MediaRepository {
                 if changed || entry.timelineKeyVersion != TimelinePolicy.version || entry.timelineSortKey.isEmpty {
                     TimelineDates.apply(to: entry)
                 }
+                if before != timelineItem(entry, completed: library.completedScanSequence) { timelineChanged = true }
             } else {
                 let entry = MediaEntry(libraryID: libraryID, run: run, file: file)
                 TimelineDates.apply(to: entry)
                 context.insert(entry); byKey[file.pathKey] = entry
+                timelineChanged = true
             }
         }
-        try advanceTimelineRevision(libraryID, context: context)
+        if timelineChanged { try advanceTimelineRevision(libraryID, context: context) }
         run.files = progress.files; run.folders = progress.folders; run.media = progress.media
         try Task.checkCancellation()
         try context.save()
@@ -99,10 +106,17 @@ actor MediaRepository {
             missing = try context.fetchCount(FetchDescriptor<MediaEntry>(predicate: #Predicate {
                 $0.libraryID == libraryID && $0.lastSeenSequence < sequence
             }))
+            let previous = library.completedScanSequence
+            let version = TimelinePolicy.version
+            let extensions = ["jpeg", "jpg", "heic", "mov", "mp4"]
+            let newlyMissing = try context.fetchCount(FetchDescriptor<MediaEntry>(predicate: #Predicate {
+                $0.libraryID == libraryID && $0.lastSeenSequence >= previous && $0.lastSeenSequence < sequence
+                    && $0.timelineKeyVersion == version && $0.timelineSortKey != "" && extensions.contains($0.fileExtension)
+            }))
             try Task.checkCancellation()
             // 完了runと公開sequenceを同じsaveで確定する。物理削除・全件更新は不要。
             library.completedScanSequence = sequence
-            library.timelineRevision = (library.timelineRevision ?? 0) + 1
+            if newlyMissing > 0 { library.timelineRevision = (library.timelineRevision ?? 0) + 1 }
         }
         run.state = completed ? "completed" : (Task.isCancelled ? "cancelled" : "failed")
         run.endedAt = Date(); run.missingCount = missing

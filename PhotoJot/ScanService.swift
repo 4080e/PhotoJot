@@ -6,9 +6,9 @@ actor ScanService {
     private var active = false
     private var currentProgress = ScanProgress()
 
-    init(access: SMBAccessCoordinator, storeURL: URL) throws {
+    init(access: SMBAccessCoordinator, repository: MediaRepository) {
         self.access = access
-        repository = try MediaRepository(url: storeURL)
+        self.repository = repository
     }
 
     func scan(settings: SMBConnectionSettings, password: String,

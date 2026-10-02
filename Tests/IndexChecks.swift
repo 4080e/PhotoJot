@@ -111,6 +111,30 @@ private func check(_ condition: @autoclosure () throws -> Bool) throws {
         let finalRows = try rows()
         try check(finalRows.count == 507)
         try check(Set(finalRows.filter { $0.relativePath.hasPrefix("root/batch/") }.map(\.id)) == batchIDs)
+        let finalSequence = try libraries().first { $0.id == first.libraryID }!.completedScanSequence
+        let partial = try await repository.begin(settings: settings)
+        try await repository.ingest([file("root/saved-before-cancel.jpg")], ticket: partial, progress: .init())
+        let stop = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                try await repository.ingest([file("root/not-saved.jpg")], ticket: partial, progress: .init())
+                fatalError("cancelled batch was saved")
+            } catch is CancellationError { }
+            _ = try await repository.finish(partial, progress: .init(), completed: false)
+        }
+        try await stop.value
+        let afterStop = try rows()
+        try check(afterStop.contains { $0.relativePath == "root/saved-before-cancel.jpg" })
+        try check(!afterStop.contains { $0.relativePath == "root/not-saved.jpg" })
+        try check(try libraries().first { $0.id == first.libraryID }!.completedScanSequence == finalSequence)
+        try check(afterStop.filter { $0.libraryID == first.libraryID && $0.isMissing(completedScanSequence: finalSequence) }.count == 5)
+        try check(try runs().first { $0.id == partial.runID }!.state == "cancelled")
+        let abandoned = try await repository.begin(settings: settings)
+        let reopened = try MediaRepository(url: url)
+        let recovery = try await reopened.begin(settings: settings)
+        try check(try runs().first { $0.id == abandoned.runID }!.state == "interrupted")
+        _ = try await reopened.finish(recovery, progress: .init(), completed: false)
+        print("PASS: saved scan batch survives cancellation, unsaved batch absent, no new missing, reopened running recovery")
         print("PASS: formats, byte-exact paths, library isolation, stable IDs, generation, failed/cancelled/interrupted scans, successful missing, reappearance, batch limits, password-free settings")
     }
 }
