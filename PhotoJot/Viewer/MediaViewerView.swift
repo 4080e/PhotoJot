@@ -6,6 +6,8 @@ struct MediaViewerView: View {
     let model: MediaViewerController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var scale
+    @ScaledMetric(relativeTo: .footnote) private var informationMaximumHeight = 104.0
+    @State private var informationContentHeight: CGFloat = 0
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
@@ -30,6 +32,9 @@ struct MediaViewerView: View {
                 }
                 .onChange(of: geometry.size, initial: true) { _, _ in model.start(item: item, viewport: viewport) }
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                information
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("閉じる") { Task { await model.stop(); dismiss() } }.disabled(model.isClosing)
@@ -44,4 +49,27 @@ struct MediaViewerView: View {
             Task { await model.stop() }
         }
     }
+
+    private var information: some View {
+        let value = MediaViewerInformation(calendarDateTime: item.date.calendarDateTime, relativePath: item.relativePath)
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(value.dateText)
+                Text(value.folder)
+                Text(value.filename)
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                informationContentHeight = $0
+            }
+        }
+        .frame(height: min(informationContentHeight, informationMaximumHeight))
+        .background(.bar)
+    }
+
 }

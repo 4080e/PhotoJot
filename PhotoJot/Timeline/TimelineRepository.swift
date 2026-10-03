@@ -61,6 +61,30 @@ actor TimelineRepository {
         try await store.timelinePage(libraryID: libraryID, after: cursor)
     }
 
+    func page(libraryID: UUID, startingAt month: TimelineMonth) async throws -> TimelinePage {
+        try await store.timelinePage(libraryID: libraryID, after: nil, startingAt: month)
+    }
+
+    func page(libraryID: UUID, around item: TimelineItem) async throws -> TimelinePage {
+        try await store.timelinePageAtItem(libraryID: libraryID, item: item)
+    }
+
+    func newerPage(libraryID: UUID, before cursor: TimelineCursor) async throws -> TimelinePage {
+        try await store.timelinePage(libraryID: libraryID, after: cursor, newer: true)
+    }
+
+    func months(libraryID: UUID) async throws -> [TimelineMonth] {
+        var result: [TimelineMonth] = []
+        var before = "2"
+        // 月ごとに1件だけ取得し、その月の全entryを読み飛ばす。
+        while let month = try await store.timelineMonth(libraryID: libraryID, before: before) {
+            try Task.checkCancellation()
+            result.append(month)
+            before = month.lowerBound
+        }
+        return result
+    }
+
     func diagnostics(settings: SMBConnectionSettings,
                      progress: @Sendable (Int) async -> Void = { _ in }) async throws -> TimelineDiagnostics {
         let before = try await store.selectMetadata(settings: settings).count
@@ -147,7 +171,43 @@ extension MediaRepository {
         return entries.count
     }
 
-    func timelinePage(libraryID: UUID, after cursor: TimelineCursor?) throws -> TimelinePage {
+    private func presentTimeline(_ library: Library) -> Predicate<MediaEntry> {
+        let libraryID = library.id
+        let completed = library.completedScanSequence
+        let version = TimelinePolicy.version
+        let extensions = ["jpg", "jpeg", "heic", "mov", "mp4"]
+        return #Predicate<MediaEntry> {
+            $0.libraryID == libraryID && $0.lastSeenSequence >= completed
+                && $0.timelineKeyVersion == version && $0.timelineSortKey != "" && extensions.contains($0.fileExtension)
+        }
+    }
+
+    func timelineMonth(libraryID: UUID, before: String) throws -> TimelineMonth? {
+        try Task.checkCancellation()
+        let context = context()
+        let library = try timelineLibrary(libraryID, context: context)
+        guard library.timelinePreparedVersion == TimelinePolicy.version else { throw TimelineError.needsPreparation }
+        let present = presentTimeline(library)
+        var fetch = FetchDescriptor<MediaEntry>(predicate: #Predicate {
+            present.evaluate($0) && $0.timelineSortKey > "1" && $0.timelineSortKey < before
+        }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .reverse)])
+        fetch.fetchLimit = 1
+        guard let key = try context.fetch(fetch).first?.timelineSortKey,
+              let year = Int(key.dropFirst().prefix(4)),
+              let month = Int(key.dropFirst(6).prefix(2)) else { return nil }
+        return TimelineMonth(year: year, month: month)
+    }
+
+    func timelinePageAtItem(libraryID: UUID, item: TimelineItem) throws -> TimelinePage {
+        let id = item.id
+        var fetch = FetchDescriptor<MediaEntry>(predicate: #Predicate { $0.id == id && $0.libraryID == libraryID })
+        fetch.fetchLimit = 1
+        let key = try context().fetch(fetch).first?.timelineSortKey
+        // UUID末尾より後の境界にし、基準entry自身を含める。削除時は旧キー直後の項目を使う。
+        return try timelinePage(libraryID: libraryID, after: nil, startingKey: (key?.isEmpty == false ? key! : item.sortKey) + "~")
+    }
+
+    func timelinePage(libraryID: UUID, after cursor: TimelineCursor?, startingAt month: TimelineMonth? = nil, newer: Bool = false, startingKey: String? = nil) throws -> TimelinePage {
         try Task.checkCancellation()
         let context = context()
         let library = try timelineLibrary(libraryID, context: context)
@@ -158,16 +218,16 @@ extension MediaRepository {
             }
         }
         guard library.timelinePreparedVersion == TimelinePolicy.version else { throw TimelineError.needsPreparation }
-        let completed = library.completedScanSequence
         let version = TimelinePolicy.version
-        let extensions = ["jpg", "jpeg", "heic", "mov", "mp4"]
-        let present = #Predicate<MediaEntry> {
-            $0.libraryID == libraryID && $0.lastSeenSequence >= completed
-                && $0.timelineKeyVersion == version && $0.timelineSortKey != "" && extensions.contains($0.fileExtension)
-        }
+        let present = presentTimeline(library)
         var fetch: FetchDescriptor<MediaEntry>
-        if let cursor {
-            let last = cursor.lastKey
+        if newer, let cursor {
+            let first = cursor.lastKey
+            // 最も近い新しい200件を取る。降順で取得すると途中の項目が抜ける。
+            fetch = FetchDescriptor(predicate: #Predicate {
+                present.evaluate($0) && $0.timelineSortKey > first
+            }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .forward)])
+        } else if let last = cursor?.lastKey ?? startingKey ?? month?.upperBound {
             fetch = FetchDescriptor(predicate: #Predicate {
                 present.evaluate($0) && $0.timelineSortKey < last
             }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .reverse)])
@@ -177,13 +237,15 @@ extension MediaRepository {
         // 1件先読みして最終ページを判断。深いページでもoffsetや全件Swift sortを使わない。
         fetch.fetchLimit = TimelinePolicy.pageSize + 1
         let rows = try context.fetch(fetch)
-        let items = rows.prefix(TimelinePolicy.pageSize).map { entry in
+        var items = rows.prefix(TimelinePolicy.pageSize).map { entry in
             TimelineItem(id: entry.id, libraryID: entry.libraryID, relativePath: entry.relativePath,
                          mediaType: entry.mediaType, fileExtension: entry.fileExtension, generation: entry.generation,
                          date: TimelineDates.resolve(entry), sortKey: entry.timelineSortKey,
                          metadataState: entry.metadataState, metadataIsCurrent: TimelineDates.hasCurrentMetadata(entry))
         }
-        let next = rows.count > TimelinePolicy.pageSize ? items.last.map {
+        if newer { items.reverse() }
+        let boundary = newer ? items.first : items.last
+        let next = rows.count > TimelinePolicy.pageSize ? boundary.map {
             TimelineCursor(libraryID: libraryID, revision: revision, keyVersion: version, lastKey: $0.sortKey)
         } : nil
         return TimelinePage(items: items, next: next, revision: revision)

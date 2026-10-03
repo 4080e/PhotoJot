@@ -38,7 +38,8 @@ private actor PageFeed {
     func requestCount() -> Int { requests.count }
     func prepareCount() -> Int { preparations }
     nonisolated func source() -> TimelinePageSource {
-        TimelinePageSource(prepare: { await self.prepare() }, page: { _, cursor in try await self.read(after: cursor) })
+        TimelinePageSource(prepare: { await self.prepare() }, page: { _, cursor in try await self.read(after: cursor) },
+                           anchorPage: { _, _ in try await self.read(after: nil) })
     }
 }
 
@@ -106,8 +107,8 @@ private actor PageFeed {
         await resetFeed.invalidate(with: page([replacement], more: false))
         await resetting.loadMoreIfNeeded(visibleID: first.last!.id)
         check(resetting.loadedCount == 1 && resetting.blocks[0].items[0].id == replacement.id, "cursor invalidation replaces old pages")
-        check(resetting.displayGeneration != oldDisplay && resetting.errorMessage == nil, "reset scroll identity")
-        check(await resetFeed.prepareCount() == 2, "one re-prepare")
+        check(resetting.displayGeneration == oldDisplay && resetting.errorMessage == nil, "revision refresh does not issue another jump")
+        check(await resetFeed.prepareCount() == 1, "viewport refresh does not re-prepare the month origin")
         check(await resetFeed.requestCount() == 3, "one bounded restart")
 
         let failingFeed = PageFeed(pages: [page(first, more: true), page(third, more: false)])
@@ -209,6 +210,147 @@ private actor PageFeed {
         await switchBack.loadInitial()
         check(switchBack.loadedCount == 200 && switchBack.blocks.flatMap(\.items).allSatisfy { $0.libraryID == scan.libraryID },
               "switch back reads only original library")
+        // 年月ジャンプも実SwiftData indexを使う。選択月は200件を超え、同日時の境界を跨ぐ。
+        var jumpSettings = settings; jumpSettings.share = "month-jump"
+        let iso = ISO8601DateFormatter()
+        func dated(_ path: String, _ date: String?) -> ScannedMedia {
+            ScannedMedia(path: path, size: 100, creation: date.flatMap { iso.date(from: $0) } ?? Date(timeIntervalSince1970: -11644473600), modified: Date(timeIntervalSince1970: -11644473600))
+        }
+        let august = (0..<205).map { dated("aug/\($0).jpg", "2024-08-31T23:59:59Z") }
+        let newerFiles = (0..<450).map { dated("newer/\($0).jpg", "2024-09-01T00:00:00Z") }
+        let monthFiles = august + newerFiles + [
+            dated("latest.mov", "2025-01-01T00:00:00Z"),
+            dated("september.jpg", "2024-09-01T00:00:00Z"),
+            dated("aug-start.jpg", "2024-08-01T00:00:00Z"),
+            dated("july.jpg", "2024-07-31T23:59:59Z"),
+            dated("january.jpg", "2024-01-01T00:00:00Z"),
+            dated("december.jpg", "2023-12-31T23:59:59Z"),
+            dated("unknown.jpg", nil)
+        ]
+        let monthScan = try await repository.begin(settings: jumpSettings)
+        let initialMonthFiles = monthFiles + [dated("removed.jpg", "2030-06-01T00:00:00Z")]
+        for offset in stride(from: 0, to: initialMonthFiles.count, by: 200) {
+            try await repository.ingest(Array(initialMonthFiles.dropFirst(offset).prefix(200)), ticket: monthScan, progress: .init())
+        }
+        _ = try await repository.finish(monthScan, progress: .init(), completed: true)
+        let monthRemoval = try await repository.begin(settings: jumpSettings)
+        for offset in stride(from: 0, to: monthFiles.count, by: 200) {
+            try await repository.ingest(Array(monthFiles.dropFirst(offset).prefix(200)), ticket: monthRemoval, progress: .init())
+        }
+        _ = try await repository.finish(monthRemoval, progress: .init(), completed: true)
+        let jumping = TimelineController(source: .local(repository: timeline, settings: jumpSettings))
+        await jumping.loadInitial()
+        let candidates = try await jumping.availableMonths()
+        check(candidates.map(\.id) == ["2025-01", "2024-09", "2024-08", "2024-07", "2024-01", "2023-12"], "only present months, no unknown/missing/other library")
+        let aug = TimelineMonth(year: 2024, month: 8)
+        let beforeJumpDisplay = jumping.displayGeneration
+        await jumping.jump(to: aug)
+        check(jumping.selectedMonth == aug && jumping.displayGeneration != beforeJumpDisplay, "jump replaces origin")
+        let jumped = jumping.blocks.flatMap(\.items)
+        check(jumped.count == 200 && jumped.allSatisfy { $0.relativePath.hasPrefix("aug/") }, "direct bounded page starts at newest in selected month")
+        check(jumped.map(\.sortKey) == jumped.map(\.sortKey).sorted(by: >), "tie order stable")
+        let jumpDisplay = jumping.displayGeneration
+        await jumping.loadMoreIfNeeded(visibleID: jumped.last!.id)
+        let entireJump = jumping.blocks.flatMap(\.items)
+        check(entireJump.count == 210 && Set(entireJump.map(\.id)).count == 210 && !jumping.hasMore, "next page no gaps or duplicates")
+        check(entireJump.map(\.sortKey) == entireJump.map(\.sortKey).sorted(by: >), "ties stable across pages")
+        check(entireJump.last?.date.kind == .unknown, "unknown remains in normal paging")
+        check(jumping.displayGeneration == jumpDisplay, "paging retains scroll identity")
+        let anchor = entireJump[3].id
+        jumping.visibleItemID = anchor
+        let originalBlockID = jumping.blocks.first!.id
+        await jumping.loadNewerIfNeeded(visibleID: anchor)
+        check(jumping.loadedCount == 410 && jumping.hasNewer, "newer fetch bounded to 200")
+        check(jumping.visibleItemID == anchor && jumping.displayGeneration == jumpDisplay, "prepend preserves current media anchor and scroll identity")
+        check(jumping.blocks.contains { $0.id == originalBlockID }, "old block identity retained")
+        await jumping.loadNewerIfNeeded(visibleID: jumping.blocks.first!.items.first!.id)
+        check(jumping.loadedCount == 610 && jumping.hasNewer, "second newer page")
+        await jumping.loadNewerIfNeeded(visibleID: jumping.blocks.first!.items.first!.id)
+        let bidirectional = jumping.blocks.flatMap(\.items)
+        check(bidirectional.count == monthFiles.count && !jumping.hasNewer && !jumping.hasMore, "latest and oldest reached independently")
+        check(Set(bidirectional.map(\.id)).count == monthFiles.count, "no bidirectional duplicates")
+        check(bidirectional.map(\.sortKey) == bidirectional.map(\.sortKey).sorted(by: >), "stable date/UUID order across newer pages")
+        await jumping.loadNewer()
+        check(jumping.loadedCount == monthFiles.count, "stop after latest")
+        await jumping.jump(to: aug)
+        await jumping.loadNewer()
+        await jumping.loadMoreIfNeeded(visibleID: jumping.blocks.last!.items.last!.id)
+        check(jumping.loadedCount == 410 && !jumping.hasMore && jumping.hasNewer, "older cursor still works after prepend")
+        for (month, path) in [(TimelineMonth(year: 2025, month: 1), "latest.mov"),
+                              (TimelineMonth(year: 2024, month: 1), "january.jpg"),
+                              (TimelineMonth(year: 2023, month: 12), "december.jpg")] {
+            await jumping.jump(to: month)
+            check(jumping.blocks.first?.items.first?.relativePath == path, "month/year boundary starts inclusively at newest")
+        }
+        await jumping.jump(to: nil)
+        check(!jumping.hasNewer && jumping.selectedMonth == nil && jumping.blocks.first?.items.first?.relativePath == "latest.mov", "return to latest")
+        // 更新でcursorが失効しても、選択月の起点を維持して再取得する。
+        await jumping.jump(to: aug)
+        let revisionAnchor = jumping.blocks.first!.items[37]
+        jumping.visibleItemID = revisionAnchor.id
+        let revisionJumpID = jumping.displayGeneration
+        let refreshScan = try await repository.begin(settings: jumpSettings)
+        try await repository.ingest([dated("extra.jpg", "2024-07-01T00:00:00Z")], ticket: refreshScan, progress: .init())
+        _ = try await repository.finish(refreshScan, progress: .init(), completed: false)
+        await jumping.loadMoreIfNeeded(visibleID: jumping.blocks.last!.items.last!.id)
+        check(jumping.selectedMonth == aug && jumping.blocks.first!.items.first!.id == revisionAnchor.id, "revision refresh uses current media, not month origin")
+        check(jumping.displayGeneration == revisionJumpID && jumping.visibleItemID == revisionAnchor.id, "revision never reapplies initial jump")
+        // 通信待ちに相当するpage待ち中の重複要求と、表示中IDの変更を検証。
+        let preceding = (401...600).reversed().map { item($0) }
+        let newerFeed = PageFeed(pages: [page(first, more: true), page(preceding, more: false)])
+        var newerSource = newerFeed.source()
+        newerSource.monthPage = { _, _ in try await newerFeed.read(after: nil) }
+        newerSource.newerPage = { _, cursor in try await newerFeed.read(after: cursor) }
+        let anchored = TimelineController(source: newerSource)
+        await anchored.jump(to: aug)
+        check(anchored.visibleItemID == nil && anchored.blocks.first!.items.first!.id == first.first!.id, "initial jump does not pin observation to an ID")
+        let stableBlock = anchored.blocks.first!.id
+        await newerFeed.suspend()
+        let prependTask = Task { await anchored.loadNewer() }
+        await newerFeed.waitForRead()
+        anchored.visibleItemID = first[5].id
+        await anchored.loadNewer()
+        await anchored.loadMoreIfNeeded(visibleID: first.last!.id)
+        check(await newerFeed.requestCount() == 2, "shared loading guard prevents both direction duplicates")
+        await newerFeed.release(); await prependTask.value
+        check(anchored.visibleItemID == first[5].id && anchored.blocks.first!.id == stableBlock, "in-flight scroll anchor and same-day block identity retained")
+        check(anchored.blocks.count == 1 && anchored.loadedCount == 400, "same-day prepend merges without duplicates")
+        let changingFeed = PageFeed(pages: [page(first, more: true)])
+        let rebaseFeed = PageFeed(pages: [page(Array(first.dropFirst(3)), more: false), page(Array(first.dropFirst(5)), more: false)])
+        var changingSource = changingFeed.source()
+        changingSource.anchorPage = { _, _ in try await rebaseFeed.read(after: nil) }
+        let changingViewport = TimelineController(source: changingSource)
+        await changingViewport.loadInitial()
+        let changingJumpID = changingViewport.displayGeneration
+        changingViewport.visibleItemID = first[3].id
+        await changingFeed.invalidate(with: page([], more: false))
+        await rebaseFeed.suspend()
+        let refresh = Task { await changingViewport.loadMoreIfNeeded(visibleID: first.last!.id) }
+        await rebaseFeed.waitForRead()
+        changingViewport.visibleItemID = first[5].id
+        await rebaseFeed.release()
+        await refresh.value
+        check(await rebaseFeed.requestCount() == 2, "in-flight viewport change refreshes latest observed media")
+        check(changingViewport.blocks.first?.items.first?.id == first[5].id && changingViewport.displayGeneration == changingJumpID, "user scrolling wins over stale rebase request")
+        let viewport = TimelineViewportAnchor(id: first[5].id, distanceFromTop: -23)
+        check(viewport.contentOffset(itemMinY: 1400, topInset: 64) == 1359, "partial visible cell retains actual position with inset")
+        let offset = viewport.contentOffset(itemMinY: 2800, topInset: 64)
+        check(2800 - offset - 64 == -23, "prepend retains exact viewport coordinate, not page top")
+        let userMoved = TimelineViewportAnchor(id: first[9].id, distanceFromTop: 12)
+        check(userMoved.contentOffset(itemMinY: 3000, topInset: 64) == 2924, "fresh anchor after scrolling supersedes initial jump")
+        let titleJumpID = anchored.displayGeneration
+        let titleVersion = anchored.contentVersion
+        let titleAnchor = anchored.visibleItemID
+        anchored.updateDisplayedMonth(first[0].date.month)
+        check(anchored.displayedMonth == TimelineMonth(year: 2026, month: 1), "visible media month independent of selected month")
+        anchored.updateDisplayedMonth(item(700, date: "2025-12-31T23:59:59").date.month)
+        check(anchored.displayedMonth == TimelineMonth(year: 2025, month: 12), "month and year boundary updates title")
+        anchored.updateDisplayedMonth(item(701, date: nil).date.month)
+        check(anchored.displayedMonth == TimelineMonth(year: 2025, month: 12), "unknown date retains last month")
+        check(anchored.displayGeneration == titleJumpID && anchored.contentVersion == titleVersion && anchored.visibleItemID == titleAnchor, "title update never changes viewport or paging")
+        print("PASS: observed month title, month/year boundary, unknown date stability, observation-only update")
+        print("PASS: bidirectional pages, bounds, stable ties, independent cursors, anchor retention, shared exclusion")
+        print("PASS: month candidates, direct month start, month/year boundaries, stable ties, next page, unknown tail, latest return")
         print("PASS: empty retry, no-library recovery, reload during initial read, populated display preserved, offline/index-first, library isolation and switch back")
         print("Timeline UI checks passed: first/next/final, duplicate suppression, incremental groups, mixed offsets, unknown, stable order, invalidation, retry, empty, local-only repository, missing exclusion, metadata preservation")
     }

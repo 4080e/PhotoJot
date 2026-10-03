@@ -6,9 +6,20 @@ nonisolated struct TimelinePageSource: Sendable {
     let prepare: @Sendable () async throws -> UUID
     let page: @Sendable (UUID, TimelineCursor?) async throws -> TimelinePage
 
+    var months: @Sendable (UUID) async throws -> [TimelineMonth] = { _ in [] }
+    var monthPage: @Sendable (UUID, TimelineMonth) async throws -> TimelinePage = { _, _ in throw TimelineError.needsPreparation }
+
+    var newerPage: @Sendable (UUID, TimelineCursor) async throws -> TimelinePage = { _, _ in throw TimelineError.needsPreparation }
+
+    var anchorPage: @Sendable (UUID, TimelineItem) async throws -> TimelinePage = { _, _ in throw TimelineError.needsPreparation }
+
     static func local(repository: TimelineRepository, settings: SMBConnectionSettings) -> Self {
         Self(prepare: { try await repository.prepare(settings: settings) },
-             page: { try await repository.page(libraryID: $0, after: $1) })
+             page: { try await repository.page(libraryID: $0, after: $1) },
+             months: { try await repository.months(libraryID: $0) },
+             monthPage: { try await repository.page(libraryID: $0, startingAt: $1) },
+             newerPage: { try await repository.newerPage(libraryID: $0, before: $1) },
+             anchorPage: { try await repository.page(libraryID: $0, around: $1) })
     }
 
 
@@ -21,6 +32,7 @@ nonisolated struct TimelinePageSource: Sendable {
     private(set) var items: [TimelineItem]
     init(first: TimelineItem) { id = first.id; group = first.date.groupKey; items = [first] }
     func append(_ item: TimelineItem) { items.append(item) }
+    func prepend(_ values: [TimelineItem]) { items.insert(contentsOf: values, at: 0) }
 }
 
 @MainActor @Observable final class TimelineController {
@@ -29,18 +41,60 @@ nonisolated struct TimelinePageSource: Sendable {
     private(set) var isLoading = false
     private(set) var hasLoaded = false
     private(set) var hasMore = false
+    private(set) var hasNewer = false
+    private(set) var isLoadingNewer = false
+    private(set) var newerErrorMessage: String?
+    // Viewportの観測値だけ。プログラム上の位置指定には使用しない。
+    @ObservationIgnored var visibleItemID: UUID?
+    private(set) var contentVersion = 0
     private(set) var errorMessage: String?
     private(set) var emptyMessage = "保存済みの対象メディアがありません。"
     private(set) var displayGeneration = UUID()
+    private(set) var selectedMonth: TimelineMonth?
+    private(set) var displayedMonth: TimelineMonth?
+
+    // 閲覧位置からの表示専用通知。ジャンプ・ページングの状態には触れない。
+    func updateDisplayedMonth(_ month: TimelineMonth?) {
+        guard let month, displayedMonth != month else { return }
+        displayedMonth = month
+    }
+
     @ObservationIgnored private let source: TimelinePageSource
     @ObservationIgnored private var emptyReloadRequested = false
     @ObservationIgnored private var libraryID: UUID?
     @ObservationIgnored private var cursor: TimelineCursor?
+    @ObservationIgnored private var newerCursor: TimelineCursor?
     @ObservationIgnored private var loadTriggerIDs: Set<UUID> = []
     // 次ページを促すのは取得済み末尾の少数件。page自体の件数はTimelinePolicyで管理。
     private static let nextPageThreshold = 20
 
     init(source: TimelinePageSource) { self.source = source }
+
+    func availableMonths() async throws -> [TimelineMonth] {
+        let id = try await source.prepare()
+        return try await source.months(id)
+    }
+
+    // 取得成功時だけ表示を置換。失敗時は既存のtimelineと起点を維持する。
+    func jump(to month: TimelineMonth?) async {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let id = try await source.prepare()
+            let page: TimelinePage
+            if let month { page = try await source.monthPage(id, month) }
+            else { page = try await source.page(id, nil) }
+            try Task.checkCancellation()
+            reset()
+            selectedMonth = month
+            errorMessage = nil
+            libraryID = id
+            append(page)
+            configureNewer(page)
+        } catch is CancellationError { }
+        catch { errorMessage = error.localizedDescription }
+    }
 
     func loadInitial() async {
         guard !isLoading, !hasLoaded else { return }
@@ -82,6 +136,55 @@ nonisolated struct TimelinePageSource: Sendable {
         else { await loadInitial() }
     }
 
+    func loadNewerIfNeeded(visibleID: UUID) async {
+        guard newerErrorMessage == nil,
+              blocks.lazy.flatMap({ $0.items }).prefix(Self.nextPageThreshold).contains(where: { $0.id == visibleID }) else { return }
+        await loadNewer()
+    }
+
+    func loadNewer() async {
+        guard !isLoading, hasNewer, let libraryID, let newerCursor else { return }
+        isLoading = true; isLoadingNewer = true; newerErrorMessage = nil
+        defer { isLoading = false; isLoadingNewer = false }
+        do {
+            let page = try await source.newerPage(libraryID, newerCursor)
+            try Task.checkCancellation()
+            prepend(page)
+        } catch is CancellationError { }
+        catch TimelineError.changedDuringRead {
+            do { try await refreshAtViewport() }
+            catch is CancellationError { }
+            catch { newerErrorMessage = error.localizedDescription }
+        } catch { newerErrorMessage = error.localizedDescription }
+    }
+
+    private func configureNewer(_ page: TimelinePage, preservingViewport: Bool = false) {
+        newerCursor = selectedMonth == nil && !preservingViewport ? nil : page.items.first.map {
+            TimelineCursor(libraryID: $0.libraryID, revision: page.revision,
+                           keyVersion: TimelinePolicy.version, lastKey: $0.sortKey)
+        }
+        hasNewer = newerCursor != nil
+    }
+
+    private func prepend(_ page: TimelinePage) {
+        var added: [TimelineBlock] = []
+        for item in page.items {
+            if let last = added.last, last.group == item.date.groupKey { last.append(item) }
+            else { added.append(TimelineBlock(first: item)) }
+        }
+        // 境界の日付が同じなら既存blockへ前置し、既存block/cellのidentityを保つ。
+        if let last = added.last, let first = blocks.first, last.group == first.group {
+            first.prepend(last.items)
+            added.removeLast()
+        }
+        blocks.insert(contentsOf: added, at: 0)
+        contentVersion += 1
+        loadedCount += page.items.count
+        newerCursor = page.next
+        hasNewer = page.next != nil
+        // 古い方向のcursor、displayGeneration、visibleItemIDはそのまま。
+    }
+
     private func loadNext() async {
         guard !isLoading, hasMore, let libraryID, let cursor else { return }
         // awaitより前に排他。高速スクロールからの重複triggerも同じcursorを二重取得しない。
@@ -93,26 +196,51 @@ nonisolated struct TimelinePageSource: Sendable {
             append(page)
         } catch is CancellationError { }
         catch TimelineError.changedDuringRead {
-            // 古いページ群に新しいrevisionを混ぜない。自動再取得は1回だけ。
-            do { try await startFromBeginning(replacing: true) }
+            // 古いページ群に新しいrevisionを混ぜず、閲覧中の位置から取り直す。
+            do { try await refreshAtViewport() }
             catch is CancellationError { }
             catch { errorMessage = error.localizedDescription }
         } catch { errorMessage = error.localizedDescription }
     }
 
+    private func refreshAtViewport() async throws {
+        guard let id = libraryID else { return }
+        while true {
+            let observedID = visibleItemID
+            guard let anchor = blocks.lazy.flatMap({ $0.items }).first(where: { $0.id == observedID }) ?? blocks.first?.items.first else { return }
+            let page = try await source.anchorPage(id, anchor)
+            try Task.checkCancellation()
+            // 問い合わせ中にユーザーが移動した場合は、新しいviewportを優先する。
+            guard visibleItemID == observedID else { continue }
+            reset(preservingViewport: true)
+            errorMessage = nil
+            append(page)
+            configureNewer(page, preservingViewport: true)
+            return
+        }
+    }
+
     private func startFromBeginning(replacing: Bool = false) async throws {
         let id = try await source.prepare()
-        let page = try await source.page(id, nil)
+        let page: TimelinePage
+        if let selectedMonth { page = try await source.monthPage(id, selectedMonth) }
+        else { page = try await source.page(id, nil) }
         try Task.checkCancellation()
         if replacing { reset() }
         libraryID = id
         append(page)
+        configureNewer(page)
     }
 
-    private func reset() {
+    private func reset(preservingViewport: Bool = false) {
         blocks = []; loadedCount = 0
         hasLoaded = false; hasMore = false; cursor = nil; loadTriggerIDs = []
-        displayGeneration = UUID()
+        newerCursor = nil; hasNewer = false; newerErrorMessage = nil
+        if !preservingViewport {
+            visibleItemID = nil
+            // 初回／明示的な年月ジャンプ・最新操作だけの一回限りの位置指定。
+            displayGeneration = UUID()
+        }
     }
 
     private func append(_ page: TimelinePage) {
@@ -122,6 +250,7 @@ nonisolated struct TimelinePageSource: Sendable {
                 last.append(item)
             } else { blocks.append(TimelineBlock(first: item)) }
         }
+        contentVersion += 1
         loadedCount += page.items.count
         cursor = page.next; hasMore = page.next != nil; hasLoaded = true
         loadTriggerIDs = hasMore ? Set(page.items.suffix(Self.nextPageThreshold).map(\.id)) : []

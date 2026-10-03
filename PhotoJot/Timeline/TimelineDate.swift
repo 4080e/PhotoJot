@@ -22,6 +22,12 @@ nonisolated struct TimelineDate: Sendable, Equatable {
     let kind: TimelineDateKind
     let source: String?
     let quality: String?
+    var month: TimelineMonth? {
+        guard let calendarDateTime,
+              let year = Int(calendarDateTime.prefix(4)),
+              let month = Int(calendarDateTime.dropFirst(5).prefix(2)) else { return nil }
+        return TimelineMonth(year: year, month: month)
+    }
     var groupKey: TimelineGroupKey? {
         calendarDateTime.map { TimelineGroupKey(day: String($0.prefix(10))) }
     }
@@ -140,5 +146,27 @@ nonisolated enum TimelineDates {
         let base = String(format: "%04d-%02d-%02dT%02d:%02d:%02d", year, month, day, hour, minute, second)
         let fraction = normalizedFraction(String(format: "%09d", c.nanosecond ?? 0))
         return base + (fraction.isEmpty ? "" : "." + fraction)
+    }
+}
+
+// 端末timezoneではなく、既存timelineの暦日時キーと同じ年月を使う。
+nonisolated struct TimelineMonth: Hashable, Sendable, Identifiable {
+    let year: Int
+    let month: Int
+    var id: String { String(format: "%04d-%02d", year, month) }
+    var title: String { "\(year)年\(month)月" }
+    var lowerBound: String { "1" + id }
+    var upperBound: String {
+        if year == 9999 && month == 12 { return "2" }
+        return "1" + String(format: "%04d-%02d", month == 12 ? year + 1 : year, month == 12 ? 1 : month + 1)
+    }
+}
+
+// 初期ジャンプとは独立した一回限りの、既存セルのviewport内座標。
+nonisolated struct TimelineViewportAnchor: Equatable {
+    let id: UUID
+    let distanceFromTop: Double
+    func contentOffset(itemMinY: Double, topInset: Double) -> Double {
+        itemMinY - distanceFromTop - topInset
     }
 }
