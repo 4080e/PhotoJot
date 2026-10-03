@@ -3,6 +3,7 @@ import AVKit
 import Observation
 
 @MainActor @Observable final class MediaViewerController {
+    private(set) var activeItem: TimelineItem?
     private(set) var image: CGImage?
     private(set) var player: AVPlayer?
     private(set) var message: String?
@@ -16,9 +17,10 @@ import Observation
     @ObservationIgnored private var cleanup: Task<Void, Never>?
     @ObservationIgnored private var observation: NSKeyValueObservation?
     @ObservationIgnored private var presentation: (item: TimelineItem, viewport: FullPhotoViewport)?
+    @ObservationIgnored private var pendingSelection: (item: TimelineItem, viewport: FullPhotoViewport)?
     private var resumeAfterBackground = false
     // 復帰予約中は中断メッセージではなく、通常の読み込み表示を使う。
-    var showsLoading: Bool { resumeAfterBackground || isLoading }
+    var showsLoading: Bool { resumeAfterBackground || isLoading || pendingSelection != nil }
     private var awaitingAutoplay = false
     private var background = false
     private var editing = false
@@ -28,12 +30,30 @@ import Observation
         self.resolve = resolve; self.open = open
     }
 
+    // ページ確定時だけ呼ぶ。旧処理の終了中は最新の要求1件へ集約する。
+    func select(item: TimelineItem, viewport: FullPhotoViewport, force: Bool = false) {
+        guard viewport.valid, !editing else { return }
+        if !force, activeItem == item, pendingSelection == nil, work != nil || message != nil { return }
+        if !force, pendingSelection?.item == item { return }
+        cancelAutomaticResume()
+        pendingSelection = (item, viewport)
+        activeItem = nil
+        _ = requestStop(message: nil)
+    }
+
+    private func startPendingSelection() {
+        guard !background, !editing, !isClosing, work == nil, let next = pendingSelection else { return }
+        pendingSelection = nil
+        start(item: next.item, viewport: next.viewport)
+    }
+
     func start(item: TimelineItem, viewport: FullPhotoViewport) {
         guard work == nil, !isClosing, viewport.valid else { return }
         guard !background, !editing else {
             message = "現在メディアを読み込めません。接続設定を閉じ、再読み込みしてください。"
             return
         }
+        activeItem = item
         presentation = (item, viewport)
         image = nil; player = nil; message = nil; isLoading = true
         work = Task {
@@ -101,6 +121,7 @@ import Observation
 
     // 明示的な終了・手動再試行・設定変更は自動再開予約も破棄する。
     func cancelAutomaticResume() {
+        pendingSelection = nil
         presentation = nil
         resumeAfterBackground = false
     }
@@ -122,6 +143,7 @@ import Observation
             work = nil; image = nil; isLoading = false
             self.message = message
             cleanup = nil; isClosing = false
+            startPendingSelection()
             resumeIfNeeded()
         }
         cleanup = task
@@ -153,6 +175,7 @@ import Observation
             }
         } else if phase == .active {
             background = false
+            startPendingSelection()
             resumeIfNeeded()
         }
     }

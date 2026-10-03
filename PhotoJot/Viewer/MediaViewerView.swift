@@ -2,55 +2,63 @@ import SwiftUI
 import AVKit
 
 struct MediaViewerView: View {
-    let item: TimelineItem
+    @State private var session: ViewerSession
     let model: MediaViewerController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var scale
     @ScaledMetric(relativeTo: .footnote) private var informationMaximumHeight = 104.0
     @State private var informationContentHeight: CGFloat = 0
+    init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository) {
+        self.model = model
+        let source = TimelinePageSource(prepare: { item.libraryID },
+                                        page: { try await repository.page(libraryID: $0, after: $1) },
+                                        newerPage: { try await repository.newerPage(libraryID: $0, before: $1) },
+                                        anchorPage: { try await repository.page(libraryID: $0, around: $1) })
+        _session = State(initialValue: ViewerSession(item: item, source: source))
+    }
+
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
                 let viewport = FullPhotoViewport(width: geometry.size.width, height: geometry.size.height, scale: scale)
-                ZStack {
-                    Color.black
-                    if model.showsLoading { ProgressView("読み込み中…") }
-                    else if let player = model.player { VideoPlayer(player: player) }
-                    else if let image = model.image {
-                        Image(decorative: image, scale: 1).resizable().scaledToFit()
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                    } else if let message = model.message {
-                        ContentUnavailableView {
-                            Label("表示できません", systemImage: "exclamationmark.triangle")
-                        } description: { Text(message) } actions: {
-                            Button("再読み込み") {
-                                Task { await model.stop(); model.start(item: item, viewport: viewport) }
-                            }.disabled(model.isClosing)
+                ViewerPagerView(session: session, model: model, viewport: viewport)
+                    .onChange(of: session.currentItem, initial: true) { _, item in
+                        model.select(item: item, viewport: viewport)
+                    }
+                    .onChange(of: geometry.size) { _, _ in
+                        model.select(item: session.currentItem, viewport: viewport)
+                    }
+                    .overlay(alignment: .top) {
+                        if let message = session.errorMessage {
+                            VStack {
+                                Text(message)
+                                Button("再試行") { session.retry() }
+                            }.font(.footnote).padding().background(.bar)
                         }
-                    } else { ProgressView("読み込み中…") }
-                    if model.isClosing { ProgressView("終了処理中…") }
-                }
-                .onChange(of: geometry.size, initial: true) { _, _ in model.start(item: item, viewport: viewport) }
+                    }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 information
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { Task { await model.stop(); dismiss() } }.disabled(model.isClosing)
+                    Button("閉じる") { session.close(); Task { await model.stop(); dismiss() } }.disabled(model.isClosing)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled()
+        .task { session.begin() }
         .onDisappear {
+            session.close()
             model.cancelAutomaticResume()
             Task { await model.stop() }
         }
     }
 
     private var information: some View {
+        let item = session.currentItem
         let value = MediaViewerInformation(calendarDateTime: item.date.calendarDateTime, relativePath: item.relativePath)
         return ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 4) {

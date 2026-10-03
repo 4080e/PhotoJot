@@ -5,6 +5,7 @@ struct TimelineView: View {
     @State private var viewingItem: TimelineItem?
     @State private var selectingMonth = false
     @State private var model: TimelineController
+    private let repository: TimelineRepository
     let update: LibraryUpdateController
     let thumbnails: ThumbnailSession
     #if DEBUG
@@ -12,6 +13,7 @@ struct TimelineView: View {
     #endif
 
     init(repository: TimelineRepository, settings: SMBConnectionSettings, update: LibraryUpdateController, thumbnails: ThumbnailSession) {
+        self.repository = repository
         self.update = update
         self.thumbnails = thumbnails
         _model = State(initialValue: TimelineController(source: .local(repository: repository, settings: settings)))
@@ -60,7 +62,7 @@ struct TimelineView: View {
             }
         }
         .fullScreenCover(item: $viewingItem) { item in
-            MediaViewerView(item: item, model: viewer)
+            MediaViewerView(item: item, model: viewer, repository: repository)
         }
         .sheet(isPresented: $selectingMonth) { TimelineMonthPicker(model: model) }
         .navigationTitle(model.displayedMonth?.title ?? "年月")

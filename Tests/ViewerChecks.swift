@@ -133,9 +133,71 @@ actor ViewerReadProbe {
         failed.start(item: photo, viewport: viewport)
         await wait { !failed.isLoading }
         let failureMessage = failed.message
+        failed.select(item: photo, viewport: viewport)
+        check(!failed.isClosing)
         failed.scenePhaseChanged(.background); failed.scenePhaseChanged(.active)
         check(failedOpens == 1 && failed.message == failureMessage && !failed.showsLoading)
         await failed.stop()
+
+        // Swipes during a non-cancellable read only retain the last committed selection.
+        let switchProbe = ViewerReadProbe(jpeg, hold: true)
+        var selections: [UUID] = []
+        let switching = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { target in
+            selections.append(target.key.mediaEntryID)
+            return switchProbe.stream
+        })
+        switching.select(item: photo, viewport: viewport)
+        await wait { await switchProbe.waiting }
+        switching.select(item: video, viewport: viewport)
+        switching.select(item: photo, viewport: viewport)
+        switching.select(item: photo, viewport: viewport)
+        check(switching.isClosing && switching.activeItem == nil && selections == [photo.id])
+        check(await switchProbe.closes == 0)
+        switching.scenePhaseChanged(.background)
+        await switchProbe.release()
+        await wait { !switching.isClosing }
+        check(selections == [photo.id] && switching.showsLoading)
+        switching.scenePhaseChanged(.active); switching.scenePhaseChanged(.active)
+        await wait { switching.image != nil }
+        check(selections == [photo.id, photo.id] && switching.activeItem == photo)
+        await switching.stop()
+
+        // Mixed pages share a single loader; each settled video autoplays, then drains on departure.
+        let mixedPhoto = ViewerReadProbe(jpeg)
+        let mixedVideo = ViewerReadProbe(movie)
+        var mixedOpens: [UUID] = []
+        let mixed = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { target in
+            mixedOpens.append(target.key.mediaEntryID)
+            return target.fileExtension == "mov" ? mixedVideo.stream : mixedPhoto.stream
+        })
+        mixed.select(item: photo, viewport: viewport)
+        await wait { mixed.image != nil }
+        mixed.select(item: video, viewport: viewport)
+        await wait { mixed.player?.rate == 1 }
+        check(mixed.activeItem == video && mixed.image == nil)
+        mixed.scenePhaseChanged(.background); mixed.scenePhaseChanged(.active)
+        await wait { !mixed.isClosing && mixed.player?.rate == 1 }
+        check(mixed.activeItem == video && mixedOpens == [photo.id, video.id, video.id])
+        mixed.select(item: photo, viewport: viewport)
+        await wait { mixed.image != nil }
+        check(mixed.player == nil && mixed.activeItem == photo)
+        check(await mixedVideo.closes == 2)
+        await mixed.stop()
+
+        // Closing during selection cleanup drops the pending page permanently.
+        let closeSelectionProbe = ViewerReadProbe(jpeg, hold: true)
+        var closeSelectionOpens = 0
+        let closeSelection = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in
+            closeSelectionOpens += 1; return closeSelectionProbe.stream
+        })
+        closeSelection.select(item: photo, viewport: viewport)
+        await wait { await closeSelectionProbe.waiting }
+        closeSelection.select(item: video, viewport: viewport)
+        closeSelection.cancelAutomaticResume()
+        let selectionStop = Task { await closeSelection.stop() }
+        await closeSelectionProbe.release(); await selectionStop.value
+        closeSelection.scenePhaseChanged(.active)
+        check(closeSelectionOpens == 1 && closeSelection.player == nil && closeSelection.image == nil)
 
         let staleProbe = ViewerReadProbe(jpeg, hold: true)
         let stale = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in staleProbe.stream })

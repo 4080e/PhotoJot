@@ -1,0 +1,185 @@
+import SwiftUI
+import AVKit
+
+// UIKit owns the swipe gesture and settles one full-width page at a time.
+// Neighbour cells never start media work; the shared controller serves only the committed page.
+struct ViewerPagerView: UIViewControllerRepresentable {
+    let session: ViewerSession
+    let model: MediaViewerController
+    let viewport: FullPhotoViewport
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIViewController(context: Context) -> UIViewController {
+        let owner = UIViewController()
+        context.coordinator.owner = owner
+        let layout = ViewerPageLayout()
+        layout.scrollDirection = .horizontal
+        layout.minimumLineSpacing = 0
+        layout.minimumInteritemSpacing = 0
+        let view = ViewerCollectionView(frame: .zero, collectionViewLayout: layout)
+        view.backgroundColor = .black
+        view.isPagingEnabled = true
+        view.showsHorizontalScrollIndicator = false
+        view.contentInsetAdjustmentBehavior = .never
+        view.semanticContentAttribute = .forceLeftToRight
+        view.register(ViewerPageCell.self, forCellWithReuseIdentifier: "media")
+        view.dataSource = context.coordinator
+        view.delegate = context.coordinator
+        view.didLayout = { [weak coordinator = context.coordinator] view in
+            guard let coordinator else { return }
+            coordinator.update(view, items: coordinator.parent.session.items)
+        }
+        owner.view = view
+        return owner
+    }
+    func updateUIViewController(_ owner: UIViewController, context: Context) {
+        guard let view = owner.view as? UICollectionView else { return }
+        context.coordinator.parent = self
+        // Observe the window here, rather than only inside the UIKit data source.
+        context.coordinator.update(view, items: session.items)
+    }
+
+    @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
+        var parent: ViewerPagerView
+        weak var owner: UIViewController?
+        private var rendered: [TimelineItem] = []
+        private var size: CGSize = .zero
+        private var applying = false
+        init(_ parent: ViewerPagerView) { self.parent = parent }
+
+        func update(_ view: UICollectionView, items: [TimelineItem]) {
+            // A window rebase/prepend must not change the page underneath an unfinished swipe.
+            guard !applying, !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
+            let nextSize = view.bounds.size
+            guard nextSize.width > 0, nextSize.height > 0 else { return }
+            guard rendered != items || size != nextSize else { return }
+            applying = true
+            defer { applying = false }
+            size = nextSize
+            rendered = items
+            (view.collectionViewLayout as? UICollectionViewFlowLayout)?.itemSize = size
+            view.reloadData()
+            view.layoutIfNeeded()
+            if let index = rendered.firstIndex(where: { $0.id == parent.session.currentItem.id }) {
+                view.setContentOffset(CGPoint(x: CGFloat(index) * size.width, y: 0), animated: false)
+            }
+        }
+        func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { rendered.count }
+        func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
+                            sizeForItemAt indexPath: IndexPath) -> CGSize {
+            collectionView.bounds.size
+        }
+        func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "media", for: indexPath) as! ViewerPageCell
+            configure(cell, at: indexPath)
+            return cell
+        }
+        private func configure(_ cell: ViewerPageCell, at indexPath: IndexPath) {
+            guard let owner, rendered.indices.contains(indexPath.item) else { return }
+            cell.show(AnyView(ViewerMediaPage(item: rendered[indexPath.item], session: parent.session,
+                                             model: parent.model, viewport: parent.viewport)), in: owner)
+        }
+        func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+            if let cell = cell as? ViewerPageCell { configure(cell, at: indexPath) }
+        }
+        func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+            (cell as? ViewerPageCell)?.clear()
+        }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { settle(scrollView) }
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { settle(scrollView) }
+        }
+        private func settle(_ scrollView: UIScrollView) {
+            guard !parent.session.isClosed, let view = scrollView as? UICollectionView, size.width > 0, !rendered.isEmpty else { return }
+            let index = min(rendered.count - 1, max(0, Int((view.contentOffset.x / size.width).rounded())))
+            parent.session.commit(rendered[index])
+            parent.model.select(item: parent.session.currentItem, viewport: parent.viewport)
+            update(view, items: parent.session.items)
+        }
+    }
+}
+
+private struct ViewerMediaPage: View {
+    let item: TimelineItem
+    let session: ViewerSession
+    let model: MediaViewerController
+    let viewport: FullPhotoViewport
+    var body: some View {
+        ZStack {
+            Color.black
+            if item.id != session.currentItem.id || item.generation != session.currentItem.generation {
+                Image(systemName: item.mediaType == "video" ? "video" : "photo")
+                    .font(.largeTitle).foregroundStyle(.secondary)
+            } else if model.showsLoading || model.activeItem?.id != item.id || model.activeItem?.generation != item.generation {
+                ProgressView("読み込み中…")
+            } else if let player = model.player {
+                VideoPlayer(player: player)
+            } else if let image = model.image {
+                Image(decorative: image, scale: 1).resizable().scaledToFit()
+            } else if let message = model.message {
+                ContentUnavailableView {
+                    Label("表示できません", systemImage: "exclamationmark.triangle")
+                } description: { Text(message) } actions: {
+                    Button("再読み込み") { model.select(item: session.currentItem, viewport: viewport, force: true) }
+                        .disabled(model.isClosing)
+                }
+            } else { ProgressView("読み込み中…") }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// Size pages from UIKit's actual bounds, including initial layout and changes in the information footer.
+// This avoids applying pixel dimensions or a previous-height layout during rotation.
+class ViewerCollectionView: UICollectionView {
+    var didLayout: ((UICollectionView) -> Void)?
+    override func layoutSubviews() {
+        if bounds.width > 0, bounds.height > 0,
+           let layout = collectionViewLayout as? UICollectionViewFlowLayout, layout.itemSize != bounds.size {
+            layout.itemSize = bounds.size
+        }
+        super.layoutSubviews()
+        didLayout?(self)
+    }
+}
+
+final class ViewerPageLayout: UICollectionViewFlowLayout {
+    override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
+        collectionView?.bounds.size != newBounds.size || super.shouldInvalidateLayout(forBoundsChange: newBounds)
+    }
+    override func invalidationContext(forBoundsChange newBounds: CGRect) -> UICollectionViewLayoutInvalidationContext {
+        let context = super.invalidationContext(forBoundsChange: newBounds)
+        if collectionView?.bounds.size != newBounds.size {
+            (context as? UICollectionViewFlowLayoutInvalidationContext)?.invalidateFlowLayoutDelegateMetrics = true
+        }
+        return context
+    }
+}
+
+// VideoPlayer requires a real controller hierarchy. UIHostingConfiguration cannot host it.
+// These controllers own only presentation; MediaViewerController owns playback and SMB cleanup.
+final class ViewerPageCell: UICollectionViewCell {
+    private var host: UIHostingController<AnyView>?
+    func show(_ content: AnyView, in owner: UIViewController) {
+        if let host { host.rootView = content; return }
+        let host = UIHostingController(rootView: content)
+        self.host = host
+        owner.addChild(host)
+        host.view.backgroundColor = .clear
+        host.view.frame = contentView.bounds
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(host.view)
+        host.didMove(toParent: owner)
+    }
+    func clear() {
+        guard let host else { return }
+        host.willMove(toParent: nil)
+        host.view.removeFromSuperview()
+        host.removeFromParent()
+        self.host = nil
+    }
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        clear()
+    }
+}
