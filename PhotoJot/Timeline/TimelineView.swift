@@ -60,6 +60,14 @@ struct TimelineView: View {
                                     .accessibilityAddTraits(.isHeader)
                             }
                         }
+                        // LazyVGridの末尾が必要になったら、既存の次ページ取得を実行する。
+                        // 読み込み中も同じViewを保ち、表示状態の変更でTaskを取り消さない。
+                        Color.clear.frame(height: 1)
+                            .accessibilityHidden(true)
+                            .task(id: model.loadedCount) {
+                                guard model.hasMore, model.errorMessage == nil else { return }
+                                await model.retry()
+                            }
                     }
                     .padding(.horizontal)
                     footer.padding()
@@ -122,10 +130,7 @@ struct TimelineView: View {
                 Text(error).foregroundStyle(.secondary)
                 Button("再試行") { Task { await model.retry() } }
             }
-        } else if model.hasMore {
-            // 自動triggerが取消された場合も、末尾から確実に再試行できる。
-            Button("続きを読み込む") { Task { await model.retry() } }
-        } else {
+        } else if !model.hasMore {
             Text("\(model.loadedCount)件・すべて表示しました")
                 .font(.footnote).foregroundStyle(.secondary)
         }
