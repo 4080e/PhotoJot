@@ -5,6 +5,7 @@ import SMBClient
 // 全SMB処理は同じ接続とFIFO枠を利用する。scanはフォルダ、metadataはファイルで譲る。
 actor SMBAccessCoordinator {
     private let gate = SMBOperationGate()
+    private var viewerReaders: [UUID: (FileReader, UInt64)] = [:]
     private var client: SMBClient?
     private var connectedSettings: SMBConnectionSettings?
     private var connectedPassword: String?
@@ -13,6 +14,7 @@ actor SMBAccessCoordinator {
     #endif
 
     private func disconnect() {
+        viewerReaders.removeAll()
         client?.session.disconnect(); client = nil
         connectedSettings = nil; connectedPassword = nil
     }
@@ -100,6 +102,55 @@ actor SMBAccessCoordinator {
                 throw error
             }
         }
+    }
+
+    // Viewerはreaderを保持するが、各readの間ではSMB枠を譲る。
+    // disconnect時に全handleを失効させ、別接続で古いreaderを使わない。
+    func openViewer(target: MediaThumbnailTarget, password: String) async throws -> UUID {
+        try await withClient(settings: target.settings, password: password) { client in
+            let path = target.path.replacingOccurrences(of: "\\", with: "/")
+            guard target.fileSize > 0, !path.hasPrefix("/"), !path.split(separator: "/").contains("..") else { throw IndexFailure.invalidState }
+            let file = client.fileReader(path: target.path)
+            do {
+                let size = try await file.fileSize
+                try Task.checkCancellation()
+                guard size == UInt64(target.fileSize) else { throw IndexFailure.invalidState }
+                let id = UUID()
+                viewerReaders[id] = (file, size)
+                return id
+            } catch { try? await file.close(); throw error }
+        }
+    }
+
+    func readViewer(_ id: UUID, offset: UInt64, count: Int) async throws -> Data {
+        try await gate.acquire()
+        do {
+            try Task.checkCancellation()
+            guard let (reader, size) = viewerReaders[id], count > 0, count <= 1_048_576,
+                  offset <= size, UInt64(count) <= size - offset else { throw IndexFailure.invalidState }
+            let data = try await reader.read(offset: offset, length: UInt32(count))
+            try Task.checkCancellation()
+            guard data.count == count else { throw IndexFailure.invalidState }
+            await gate.release()
+            return data
+        } catch {
+            // 失効handleは現在の別接続を切断しない。
+            if viewerReaders[id] != nil { disconnect() }
+            await gate.release()
+            try Task.checkCancellation()
+            throw error
+        }
+    }
+
+    func closeViewer(_ id: UUID) async {
+        let cleanup = Task {
+            do { try await gate.acquire() } catch { return }
+            if let (reader, _) = viewerReaders.removeValue(forKey: id) {
+                do { try await reader.close() } catch { disconnect() }
+            }
+            await gate.release()
+        }
+        await cleanup.value
     }
 
     func scan(settings: SMBConnectionSettings, password: String,

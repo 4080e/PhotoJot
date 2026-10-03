@@ -9,6 +9,7 @@ import SwiftUI
             switch dependencies {
             case .success(let value):
                 ContentView(update: value.update, connection: value.connection, timelineRepository: value.timeline, thumbnails: value.thumbnails)
+                    .environment(value.viewer)
             case .failure(let error):
                 ContentUnavailableView("indexを開けません", systemImage: "exclamationmark.triangle",
                                        description: Text(error.localizedDescription))
@@ -17,6 +18,7 @@ import SwiftUI
         // AppのscenePhaseを使用する。画面遷移や個別windowの消失では更新を止めない。
         .onChange(of: scenePhase, initial: true) { _, phase in
             if case .success(let value) = dependencies {
+                value.viewer.scenePhaseChanged(phase)
                 value.update.scenePhaseChanged(phase)
                 value.thumbnails.scenePhaseChanged(phase)
             }
@@ -28,6 +30,7 @@ import SwiftUI
         let connection: ConnectionSettingsController
         let timeline: TimelineRepository
         let thumbnails: ThumbnailSession
+        let viewer: MediaViewerController
     }
 
     // アプリで使う保存先・Repository・SMB接続制御をここだけで生成する。
@@ -69,16 +72,24 @@ import SwiftUI
             }
             return data
         }, disconnect: { await access.disconnectWhenAvailable() })
+        let viewer = MediaViewerController(resolve: { id, libraryID in
+            try await repository.thumbnailTarget(id: id, libraryID: libraryID)
+        }, open: { target in
+            guard let password = try credentials.password(account: target.settings.credentialAccount) else { throw ScanFailure.noPassword }
+            let handle = try await access.openViewer(target: target, password: password)
+            return MediaViewerStream(read: { try await access.readViewer(handle, offset: $0, count: $1) },
+                                     close: { await access.closeViewer(handle) })
+        })
         let connection = ConnectionSettingsController(update: update,
             readPassword: { try credentials.password(account: $0) },
             savePassword: { try credentials.save(password: $1, account: $0) },
             deletePassword: { try credentials.delete(account: $0) },
             check: { settings, password in
                 _ = try await access.checkConnection(settings: settings, password: password)
-            }, editingChanged: { thumbnails.setEditing($0) },
-            beginThumbnailCheck: { await thumbnails.beginConnectionCheck() },
+            }, editingChanged: { viewer.setEditing($0); thumbnails.setEditing($0) },
+            beginThumbnailCheck: { await viewer.stop(); await thumbnails.beginConnectionCheck() },
             endThumbnailCheck: { thumbnails.endConnectionCheck() })
         return Dependencies(update: update, connection: connection,
-                            timeline: TimelineRepository(store: repository), thumbnails: thumbnails)
+                            timeline: TimelineRepository(store: repository), thumbnails: thumbnails, viewer: viewer)
     }
 }

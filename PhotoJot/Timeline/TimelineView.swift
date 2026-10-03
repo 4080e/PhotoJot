@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct TimelineView: View {
+    @Environment(MediaViewerController.self) private var viewer
+    @State private var viewingItem: TimelineItem?
     @State private var model: TimelineController
     let update: LibraryUpdateController
     let thumbnails: ThumbnailSession
@@ -40,7 +42,9 @@ struct TimelineView: View {
                         ForEach(model.blocks) { block in
                             Section {
                                 ForEach(block.items) { item in
-                                    TimelineThumbnailCell(item: item, session: thumbnails)
+                                    Button { viewingItem = item } label: {
+                                        TimelineThumbnailCell(item: item, session: thumbnails)
+                                    }.buttonStyle(.plain).disabled(viewer.isClosing)
                                         #if DEBUG
                                         .contextMenu {
                                             Button("開発用情報") { selectedItem = item }
@@ -63,6 +67,9 @@ struct TimelineView: View {
                 // cursor失効後は先頭pageの新しい表示へ切り替える。
                 .id(model.displayGeneration)
             }
+        }
+        .fullScreenCover(item: $viewingItem) { item in
+            MediaViewerView(item: item, model: viewer)
         }
         .navigationTitle("timeline")
         .navigationBarTitleDisplayMode(.inline)

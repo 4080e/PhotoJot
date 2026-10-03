@@ -115,6 +115,28 @@ actor MetadataFixture {
         let poster = try await access.thumbnail(target: videoTarget, password: "secret")
         check(CGImageSourceCreateWithData(poster as CFData, nil) != nil)
         await access.disconnectWhenAvailable()
+        // Viewer readerはopenしたままでも、各range間でscan/thumbnailが進める。
+        let viewerTarget = MediaThumbnailTarget(key: videoKey, path: "viewer.mov", fileSize: Int64(movie.count), fileExtension: "mov", settings: settings)
+        await server.configure(movie, blocked: ["read:viewer.mov"])
+        let handle = try await access.openViewer(target: viewerTarget, password: "secret")
+        let range = Task { try await access.readViewer(handle, offset: 0, count: 32) }
+        await wait { await server.waiting("read:viewer.mov") }
+        let concurrentScan = Task { try await access.scan(settings: settings, password: "secret", consume: { _,_ in }) }
+        await wait { await access.waitingOperationCount == 1 }
+        let concurrentThumbnail = Task { try await access.thumbnail(target: videoTarget, password: "secret") }
+        await wait { await access.waitingOperationCount == 2 }
+        await server.release("read:viewer.mov")
+        check(try await range.value == movie.prefix(32))
+        _ = try await concurrentScan.value; _ = try await concurrentThumbnail.value
+        check(!(await server.events.contains("close:viewer.mov")))
+        check(try await access.readViewer(handle, offset: 32, count: 32) == movie.subdata(in: 32..<64))
+        await access.closeViewer(handle); await access.closeViewer(handle)
+        check(await server.events.filter { $0 == "close:viewer.mov" }.count == 1)
+        check(await server.maximumInFlight == 1)
+        let expired = try await access.openViewer(target: viewerTarget, password: "secret")
+        await access.disconnectWhenAvailable()
+        do { _ = try await access.readViewer(expired, offset: 0, count: 32); preconditionFailure("expired handle") } catch { }
+        await access.closeViewer(expired)
         print("PASS: real coordinator with test SMB API: scan/thumbnail/metadata FIFO, close-before-handoff, connection check contention, cancelled queued scan, retry, no concurrent SMB calls")
     }
 }
