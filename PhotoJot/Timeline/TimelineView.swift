@@ -144,6 +144,7 @@ private struct TimelineMonthPicker: View {
     @Environment(\.dismiss) private var dismiss
     @State private var months: [TimelineMonth]?
     @State private var error: String?
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
 
     var body: some View {
         NavigationStack {
@@ -152,18 +153,51 @@ private struct TimelineMonthPicker: View {
                     if months.isEmpty {
                         ContentUnavailableView("年月を選べるメディアはありません", systemImage: "calendar")
                     } else {
-                        List(Array(Set(months.map(\.year))).sorted(by: >), id: \.self) { year in
-                            NavigationLink("\(String(year))年") {
-                                List(months.filter { $0.year == year }) { month in
-                                    Button("\(month.month)月") {
-                                        Task {
-                                            await model.jump(to: month)
-                                            dismiss()
+                        ScrollView {
+                            LazyVGrid(columns: columns, spacing: 16) {
+                                ForEach(Array(Set(months.map(\.year))).sorted(by: >), id: \.self) { year in
+                                    NavigationLink {
+                                        ScrollView {
+                                            LazyVGrid(columns: columns, spacing: 16) {
+                                                ForEach(months.filter { $0.year == year }) { month in
+                                                    Button {
+                                                        Task {
+                                                            await model.jump(to: month)
+                                                            dismiss()
+                                                        }
+                                                    } label: {
+                                                        Text("\(month.month)月")
+                                                            .font(.title3.weight(.semibold))
+                                                            .foregroundStyle(.primary)
+                                                            .frame(maxWidth: .infinity, minHeight: 44)
+                                                            .padding(.vertical, 12)
+                                                            .contentShape(Rectangle())
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .disabled(model.isLoading)
+                                                }
+                                            }
+                                            .padding()
                                         }
-                                    }.disabled(model.isLoading)
+                                        .navigationTitle("\(String(year))年")
+                                        .navigationBarTitleDisplayMode(.inline)
+                                        .toolbar {
+                                            ToolbarItem(placement: .principal) {
+                                                Text("\(String(year))年").font(.title2.weight(.bold))
+                                            }
+                                        }
+                                    } label: {
+                                        Text("\(String(year))年")
+                                            .font(.title2.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                            .frame(maxWidth: .infinity, minHeight: 44)
+                                            .padding(.vertical, 12)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .navigationTitle("\(String(year))年")
                             }
+                            .padding()
                         }
                     }
                 } else if let error {
@@ -174,7 +208,7 @@ private struct TimelineMonthPicker: View {
                     }
                 } else { ProgressView("年月を読み込み中…") }
             }
-            .navigationTitle("年月へ移動")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("閉じる") { dismiss() } }
             }
