@@ -5,12 +5,19 @@ import Observation
 @MainActor @Observable final class PhotoZoomState {
     static let maximumScale: CGFloat = 3
     private(set) var epoch = UUID()
+    private(set) var quarterTurns = 0
     var aspectRatio: CGFloat = 1
+    var displayedAspectRatio: CGFloat { quarterTurns.isMultiple(of: 2) ? aspectRatio : 1 / aspectRatio }
     var scale: CGFloat = 1
     var offset: CGPoint = .zero
     var pinching = false
     var pagingEnabled: Bool { !pinching && scale <= 1.001 }
-    func reset() { epoch = UUID(); scale = 1; offset = .zero; pinching = false }
+    func rotateRight() {
+        let next = (quarterTurns + 1) % 4
+        reset()
+        quarterTurns = next
+    }
+    func reset() { epoch = UUID(); scale = 1; offset = .zero; pinching = false; quarterTurns = 0 }
 }
 
 // Only one current-photo decode and one latest pending resolution. No NAS dependencies.

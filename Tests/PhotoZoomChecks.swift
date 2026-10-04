@@ -64,7 +64,31 @@ import AVKit
         precondition(replacement.imageView.image?.cgImage === larger)
         scroll.setZoomScale(1, animated: false); c.scrollViewDidEndZooming(scroll, with: c.imageView, atScale: 1)
         precondition(state.pagingEnabled && !scroll.panGestureRecognizer.isEnabled)
-        state.reset()
+        // Rotate while zoomed, fit the swapped aspect, then refine without changing rotation.
+        for turn in 1...4 {
+            state.scale = 2; state.offset = CGPoint(x: 70, y: 90)
+            state.rotateRight()
+            precondition(state.quarterTurns == turn % 4 && state.scale == 1 && state.offset == .zero && state.pagingEnabled)
+            replacement.parent = PhotoZoomView(state: state, epoch: state.epoch, image: larger, refined: { requests.append($0) })
+            replacement.update(newScroll)
+            let expected: UIImage.Orientation = [.up, .right, .down, .left][turn % 4]
+            precondition(replacement.imageView.image?.imageOrientation == expected && replacement.imageView.image?.cgImage === larger)
+            precondition(newScroll.zoomScale == 1)
+            precondition(abs(replacement.imageView.bounds.width / replacement.imageView.bounds.height - state.displayedAspectRatio) < 0.001)
+            precondition(replacement.imageView.bounds.width <= newScroll.bounds.width && replacement.imageView.bounds.height <= newScroll.bounds.height)
+            replacement.scrollViewWillBeginZooming(newScroll, with: replacement.imageView)
+            newScroll.setZoomScale(2, animated: false)
+            replacement.scrollViewDidEndZooming(newScroll, with: replacement.imageView, atScale: 2)
+            let rotatedBounds = replacement.imageView.bounds
+            let rotatedOffset = newScroll.contentOffset
+            replacement.parent = PhotoZoomView(state: state, epoch: state.epoch, image: image, refined: { requests.append($0) })
+            replacement.update(newScroll)
+            precondition(newScroll.zoomScale == 2 && newScroll.contentOffset == rotatedOffset && replacement.imageView.bounds == rotatedBounds)
+            precondition(replacement.imageView.image?.imageOrientation == expected && !state.pagingEnabled)
+        }
+        state.rotateRight(); state.reset()
+        precondition(state.quarterTurns == 0)
+        print("PASS: temporary rotation cycle, swapped fit, zoom reset, rotated refinement and lifecycle reset")
         scroll.setZoomScale(2, animated: false); c.scrollViewDidEndZooming(scroll, with: c.imageView, atScale: 2)
         precondition(state.scale == 1 && state.pagingEnabled, "late callback from old page cannot replace reset state")
         print("PASS: photo zoom, pan gating, settled refinement, reload/reconfigure retention, high-resolution swap, stale page reset")

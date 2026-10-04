@@ -35,9 +35,13 @@ struct PhotoZoomView: UIViewRepresentable {
             guard !applying, current else { return }
             applying = true
             defer { applying = false }
-            if imageView.image?.cgImage !== parent.image { imageView.image = UIImage(cgImage: parent.image) }
+            // UIImage orientation changes presentation only; the decoded pixels stay shared.
+            let orientation: UIImage.Orientation = [.up, .right, .down, .left][parent.state.quarterTurns]
+            if imageView.image?.cgImage !== parent.image || imageView.image?.imageOrientation != orientation {
+                imageView.image = UIImage(cgImage: parent.image, scale: 1, orientation: orientation)
+            }
             guard !view.isZooming, !view.isDragging, !view.isDecelerating else { return }
-            let ratio = parent.state.aspectRatio
+            let ratio = parent.state.displayedAspectRatio
             let width = min(view.bounds.width, view.bounds.height * ratio)
             guard width > 0 else { return }
             let target = CGSize(width: width, height: width / ratio)

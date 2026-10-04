@@ -52,6 +52,15 @@ struct MediaViewerView: View {
                     .allowsHitTesting(dismissProgress == 0)
             }
             .toolbar {
+                if session.currentItem.mediaType == "photo" {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("右に90°回転", systemImage: "rotate.right") { model.photo.zoom.rotateRight() }
+                            .labelStyle(.iconOnly)
+                            .disabled(model.image == nil || model.showsLoading || model.isClosing || closing ||
+                                      model.activeItem?.id != session.currentItem.id ||
+                                      model.photo.zoom.pinching || dismissProgress > 0)
+                    }
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("閉じる") {
                         close(animated: true)
