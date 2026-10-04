@@ -65,6 +65,25 @@ import CoreGraphics
     // 採用済みキーの再描画は同期lookupだけ。NSCacheが退避した場合はtaskで再取得する。
     func cachedImage(for key: ThumbnailKey) -> CGImage? { memory.image(for: key) }
 
+    // Viewer placeholder専用。通常のimageKeyと違い、生成・Keychain・SMBへ進まない。
+    nonisolated static func placeholderKey(for item: TimelineItem) -> ThumbnailKey {
+        ThumbnailKey(libraryID: item.libraryID, mediaEntryID: item.id, generation: item.generation,
+                     specificationVersion: VideoThumbnailPolicy.supports(item.fileExtension) ? VideoThumbnailPolicy.version : PhotoThumbnailPolicy.version,
+                     pixelSize: PhotoThumbnailPolicy.pixels)
+    }
+
+    func cachedImageOnly(for key: ThumbnailKey) async throws -> CGImage? {
+        try Task.checkCancellation()
+        guard try await isCurrent(key) else { return nil }
+        let image = try await memory.image(for: key) {
+            try await self.service.thumbnail(for: key, allowGeneration: false)
+        }
+        try Task.checkCancellation()
+        guard try await isCurrent(key) else { return nil }
+        try Task.checkCancellation()
+        return image
+    }
+
     func imageKey(id: UUID, libraryID: UUID) async throws -> ThumbnailKey? {
         guard let target = try await resolve(id, libraryID) else { return nil }
         try Task.checkCancellation()

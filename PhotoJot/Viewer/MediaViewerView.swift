@@ -3,12 +3,14 @@ import AVKit
 
 struct MediaViewerView: View {
     @State private var session: ViewerSession
+    let thumbnails: ThumbnailSession
     let model: MediaViewerController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var scale
     @ScaledMetric(relativeTo: .footnote) private var informationMaximumHeight = 104.0
     @State private var informationContentHeight: CGFloat = 0
-    init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository) {
+    init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository, thumbnails: ThumbnailSession) {
+        self.thumbnails = thumbnails
         self.model = model
         let source = TimelinePageSource(prepare: { item.libraryID },
                                         page: { try await repository.page(libraryID: $0, after: $1) },
@@ -21,7 +23,7 @@ struct MediaViewerView: View {
         NavigationStack {
             GeometryReader { geometry in
                 let viewport = FullPhotoViewport(width: geometry.size.width, height: geometry.size.height, scale: scale)
-                ViewerPagerView(session: session, model: model, viewport: viewport)
+                ViewerPagerView(session: session, model: model, viewport: viewport, thumbnails: thumbnails)
                     .onChange(of: session.currentItem, initial: true) { _, item in
                         model.select(item: item, viewport: viewport)
                     }

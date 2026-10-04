@@ -55,8 +55,22 @@ private final class DraggingCollection: ViewerCollectionView {
             anchorPage: { _, _ in TimelinePage(items: Array(all[300..<500]), next: nil, revision: 1) })
         let session = ViewerSession(item: seed, source: source)
         let model = MediaViewerController()
+        let cache = ThumbnailCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        func tile(_ color: UIColor) -> UIImage {
+            UIGraphicsImageRenderer(size: CGSize(width: 12, height: 12)).image { context in
+                color.setFill(); context.fill(CGRect(x: 0, y: 0, width: 12, height: 12))
+            }
+        }
+        try! await cache.save(tile(.green).jpegData(compressionQuality: 1)!, for: ThumbnailSession.placeholderKey(for: all[299]))
+        try! await cache.save(tile(.red).jpegData(compressionQuality: 1)!, for: ThumbnailSession.placeholderKey(for: all[300]))
+        let thumbnails = ThumbnailSession(cache: cache,
+            resolve: { id, library in
+                guard let item = all.first(where: { $0.id == id && $0.libraryID == library }) else { return nil }
+                return MediaThumbnailTarget(key: ThumbnailSession.placeholderKey(for: item), path: item.relativePath,
+                    fileSize: 1, fileExtension: item.fileExtension, settings: SMBConnectionSettings())
+            }, generate: { _ in fatalError("Viewer placeholder must never generate") }, disconnect: {})
         let size = CGSize(width: 320, height: 500)
-        let pager = ViewerPagerView(session: session, model: model, viewport: .init(width: 960, height: 1500))
+        let pager = ViewerPagerView(session: session, model: model, viewport: .init(width: 960, height: 1500), thumbnails: thumbnails)
         let coordinator = pager.makeCoordinator()
         coordinator.owner = root
         let layout = ViewerPageLayout()
@@ -96,11 +110,49 @@ private final class DraggingCollection: ViewerCollectionView {
         coordinator.update(view, items: session.items)
         precondition(view.contentOffset.x == 199 * size.width, "ordinary rerender never returns to original item")
         // Resizing retains the committed ID and doesn't issue another media request.
-        let resized = CGSize(width: 500, height: 320)
-        coordinator.parent = ViewerPagerView(session: session, model: model, viewport: .init(width: 1500, height: 960))
+        let resized = CGSize(width: 300, height: 320)
+        coordinator.parent = ViewerPagerView(session: session, model: model, viewport: .init(width: 1500, height: 960), thumbnails: thumbnails)
+        view.frame.origin = CGPoint(x: root.view.safeAreaInsets.left, y: root.view.safeAreaInsets.top)
         view.frame.size = resized
         coordinator.update(view, items: session.items)
         precondition(view.contentOffset.x == 199 * resized.width && model.selections.count == 2)
+        // Check the actual rendered page, with distinct cached and full-image colours.
+        func imageChannel(_ channel: Int, centred: Bool = false) -> Bool {
+            let shot = UIGraphicsImageRenderer(size: view.bounds.size).image { _ in
+                view.drawHierarchy(in: CGRect(origin: .zero, size: view.bounds.size), afterScreenUpdates: true)
+            }.cgImage!
+            let pixel = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let width = CGFloat(shot.width), height = CGFloat(shot.height)
+            let crop = CGRect(x: -width * (centred ? 0.5 : 0.6), y: -height / 2, width: width, height: height)
+            pixel.draw(shot, in: crop)
+            let bytes = pixel.data!.assumingMemoryBound(to: UInt8.self)
+            return bytes[channel] > 200 && bytes[(channel + 1) % 3] < 50 && bytes[(channel + 2) % 3] < 50
+        }
+        func expectColour(_ channel: Int, _ label: String) async {
+            let deadline = Date().addingTimeInterval(5)
+            while !imageChannel(channel) && Date() < deadline { await Task.yield() }
+            precondition(imageChannel(channel), label)
+        }
+        func expectProgress(_ channel: Int) async {
+            let deadline = Date().addingTimeInterval(5)
+            while imageChannel(channel, centred: true) && Date() < deadline { await Task.yield() }
+            precondition(!imageChannel(channel, centred: true), "small progress overlays cached thumbnail centre")
+        }
+        model.showsLoading = true
+        await expectColour(1, "cached photo replaces loading placeholder")
+        await expectProgress(1)
+        model.image = tile(.blue).cgImage
+        model.showsLoading = false
+        await expectColour(2, "full image replaces thumbnail")
+        precondition(imageChannel(2, centred: true), "progress overlay disappears with full photo")
+        model.image = nil
+        view.setContentOffset(CGPoint(x: 200 * resized.width, y: 0), animated: false)
+        coordinator.scrollViewDidEndDragging(view, willDecelerate: false)
+        model.showsLoading = true
+        await expectColour(0, "video thumbnail is red, never the previous photo")
+        await expectProgress(0)
+        model.showsLoading = false
         // Exercise VideoPlayer itself: a nil-player stub never exercised its controller embedding.
         model.activeItem = session.currentItem
         model.player = AVPlayer()
@@ -126,7 +178,7 @@ private final class DraggingCollection: ViewerCollectionView {
         precondition(embeddedPlayer.view.window != nil, "video UI is actually attached to the visible window")
         let retainedPlayer = model.player
         // Cell destruction is presentation-only; it must not clear the controller-owned player.
-        let path = IndexPath(item: 199, section: 0)
+        let path = IndexPath(item: 200, section: 0)
         let cell = view.cellForItem(at: path) as! ViewerPageCell
         coordinator.collectionView(view, didEndDisplaying: cell, forItemAt: path)
         precondition(root.children.isEmpty && model.player === retainedPlayer, "hosting is removed without stopping media ownership")
@@ -137,7 +189,7 @@ private final class DraggingCollection: ViewerCollectionView {
         cell.prepareForReuse()
         precondition(root.children.isEmpty, "reuse removes child controller containment")
         session.close()
-        print("PASS: Viewer UIKit paging, settled selection, mixed IDs, deferred window replacement, anchor retention, point sizing and rotation")
+        print("PASS: Viewer UIKit paging, settled selection, mixed IDs, deferred window replacement, anchor retention, point sizing, rotation, cached placeholders, full-image replacement and VideoPlayer containment")
         fflush(stdout)
         exit(0)
     }

@@ -62,7 +62,7 @@ struct TimelineView: View {
             }
         }
         .fullScreenCover(item: $viewingItem) { item in
-            MediaViewerView(item: item, model: viewer, repository: repository)
+            MediaViewerView(item: item, model: viewer, repository: repository, thumbnails: thumbnails)
         }
         .sheet(isPresented: $selectingMonth) { TimelineMonthPicker(model: model) }
         .navigationTitle(model.displayedMonth?.title ?? "年月")

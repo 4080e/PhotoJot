@@ -7,6 +7,7 @@ struct ViewerPagerView: UIViewControllerRepresentable {
     let session: ViewerSession
     let model: MediaViewerController
     let viewport: FullPhotoViewport
+    let thumbnails: ThumbnailSession
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIViewController(context: Context) -> UIViewController {
@@ -77,7 +78,7 @@ struct ViewerPagerView: UIViewControllerRepresentable {
         private func configure(_ cell: ViewerPageCell, at indexPath: IndexPath) {
             guard let owner, rendered.indices.contains(indexPath.item) else { return }
             cell.show(AnyView(ViewerMediaPage(item: rendered[indexPath.item], session: parent.session,
-                                             model: parent.model, viewport: parent.viewport)), in: owner)
+                                             model: parent.model, viewport: parent.viewport, thumbnails: parent.thumbnails)), in: owner)
         }
         func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
             if let cell = cell as? ViewerPageCell { configure(cell, at: indexPath) }
@@ -104,14 +105,14 @@ private struct ViewerMediaPage: View {
     let session: ViewerSession
     let model: MediaViewerController
     let viewport: FullPhotoViewport
+    let thumbnails: ThumbnailSession
     var body: some View {
         ZStack {
             Color.black
             if item.id != session.currentItem.id || item.generation != session.currentItem.generation {
-                Image(systemName: item.mediaType == "video" ? "video" : "photo")
-                    .font(.largeTitle).foregroundStyle(.secondary)
+                placeholder(loading: false)
             } else if model.showsLoading || model.activeItem?.id != item.id || model.activeItem?.generation != item.generation {
-                ProgressView("読み込み中…")
+                placeholder(loading: true)
             } else if let player = model.player {
                 VideoPlayer(player: player)
             } else if let image = model.image {
@@ -123,9 +124,55 @@ private struct ViewerMediaPage: View {
                     Button("再読み込み") { model.select(item: session.currentItem, viewport: viewport, force: true) }
                         .disabled(model.isClosing)
                 }
-            } else { ProgressView("読み込み中…") }
+            } else { placeholder(loading: true) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    private func placeholder(loading: Bool) -> some View {
+        let key = ThumbnailSession.placeholderKey(for: item)
+        return ViewerCachedThumbnail(key: key, thumbnails: thumbnails, video: item.mediaType == "video", loading: loading)
+            .id(key)
+    }
+}
+
+private struct ViewerCachedThumbnail: View {
+    let key: ThumbnailKey
+    let thumbnails: ThumbnailSession
+    let video: Bool
+    let loading: Bool
+    @State private var image: CGImage?
+
+    init(key: ThumbnailKey, thumbnails: ThumbnailSession, video: Bool, loading: Bool) {
+        self.key = key; self.thumbnails = thumbnails; self.video = video; self.loading = loading
+        // 同じキーのdecode済み画像なら初回描画から利用する。
+        _image = State(initialValue: thumbnails.cachedImage(for: key))
+    }
+    var body: some View {
+        Group {
+            if let image {
+                Image(decorative: image, scale: 1).resizable().scaledToFit()
+                    .overlay {
+                        if loading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                                .padding(8)
+                                .background(.black.opacity(0.45), in: Circle())
+                                .allowsHitTesting(false)
+                        }
+                    }
+            } else if loading { ProgressView("読み込み中…") }
+            else { Image(systemName: video ? "video" : "photo").font(.largeTitle).foregroundStyle(.secondary) }
+        }
+        .task(id: thumbnails.revision) {
+            do {
+                let result = try await thumbnails.cachedImageOnly(for: key)
+                try Task.checkCancellation()
+                image = result
+            } catch {
+                if !Task.isCancelled { image = nil }
+            }
+        }
     }
 }
 
