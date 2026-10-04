@@ -2,8 +2,8 @@ import SwiftUI
 import AVKit
 
 // The real collection view / session run here; media I/O is deliberately absent.
-struct FullPhotoViewport { let width: Double; let height: Double }
 @MainActor @Observable final class MediaViewerController {
+    let photo = PhotoResolution()
     var activeItem: TimelineItem?
     var showsLoading = false
     var player: AVPlayer?
@@ -70,7 +70,7 @@ private final class DraggingCollection: ViewerCollectionView {
                     fileSize: 1, fileExtension: item.fileExtension, settings: SMBConnectionSettings())
             }, generate: { _ in fatalError("Viewer placeholder must never generate") }, disconnect: {})
         let size = CGSize(width: 320, height: 500)
-        let pager = ViewerPagerView(session: session, model: model, viewport: .init(width: 960, height: 1500), thumbnails: thumbnails)
+        let pager = ViewerPagerView(session: session, model: model, viewport: .init(width: 960, height: 1500, scale: 1), thumbnails: thumbnails)
         let coordinator = pager.makeCoordinator()
         coordinator.owner = root
         let layout = ViewerPageLayout()
@@ -86,6 +86,15 @@ private final class DraggingCollection: ViewerCollectionView {
         root.view.addSubview(view)
         coordinator.update(view, items: session.items)
         precondition(view.contentOffset.x == 0)
+        model.photo.zoom.pinching = true
+        coordinator.update(view, items: session.items)
+        precondition(!view.isScrollEnabled, "pinch disables outer paging")
+        model.photo.zoom.pinching = false; model.photo.zoom.scale = 2
+        coordinator.update(view, items: session.items)
+        precondition(!view.isScrollEnabled, "zoomed photo disables outer paging")
+        model.photo.zoom.reset()
+        coordinator.update(view, items: session.items)
+        precondition(view.isScrollEnabled, "minimum scale restores outer paging")
         session.begin(); await session.waitForSupply()
         coordinator.update(view, items: session.items)
         precondition(view.contentOffset.x == 200 * size.width, "prepend preserves seed by ID")
@@ -111,7 +120,7 @@ private final class DraggingCollection: ViewerCollectionView {
         precondition(view.contentOffset.x == 199 * size.width, "ordinary rerender never returns to original item")
         // Resizing retains the committed ID and doesn't issue another media request.
         let resized = CGSize(width: 300, height: 320)
-        coordinator.parent = ViewerPagerView(session: session, model: model, viewport: .init(width: 1500, height: 960), thumbnails: thumbnails)
+        coordinator.parent = ViewerPagerView(session: session, model: model, viewport: .init(width: 1500, height: 960, scale: 1), thumbnails: thumbnails)
         view.frame.origin = CGPoint(x: root.view.safeAreaInsets.left, y: root.view.safeAreaInsets.top)
         view.frame.size = resized
         coordinator.update(view, items: session.items)

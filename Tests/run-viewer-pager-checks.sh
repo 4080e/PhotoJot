@@ -15,7 +15,7 @@ xcrun swiftc -parse-as-library -target arm64-apple-ios18.6-simulator -sdk "$(xcr
   PhotoJot/Thumbnails/ThumbnailRepository.swift PhotoJot/Thumbnails/PhotoThumbnailGenerator.swift PhotoJot/Thumbnails/VideoThumbnailGenerator.swift \
   PhotoJot/Thumbnails/RangeThumbnailCore.swift PhotoJot/Thumbnails/RangeThumbnailLoader.swift \
   PhotoJot/Thumbnails/JPEGThumbnailLocator.swift PhotoJot/Thumbnails/ThumbnailImages.swift \
-  PhotoJot/Timeline/TimelineController.swift PhotoJot/Viewer/ViewerSession.swift PhotoJot/Viewer/ViewerPagerView.swift Tests/ViewerPagerChecks.swift -o "$check_dir/ViewerPagerChecks.app/ViewerPagerChecks"
+  PhotoJot/Timeline/TimelineController.swift PhotoJot/Viewer/ViewerSession.swift PhotoJot/Viewer/ViewerPagerView.swift PhotoJot/Viewer/PhotoResolution.swift PhotoJot/Viewer/FullPhotoCore.swift PhotoJot/Viewer/FullPhotoImages.swift PhotoJot/Viewer/MediaViewerSource.swift PhotoJot/Viewer/PhotoZoomView.swift Tests/ViewerPagerChecks.swift -o "$check_dir/ViewerPagerChecks.app/ViewerPagerChecks"
 cat > "$check_dir/ViewerPagerChecks.app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>dev.photojot.ViewerPagerChecks</string>

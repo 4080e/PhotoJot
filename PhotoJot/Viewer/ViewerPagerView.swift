@@ -36,6 +36,7 @@ struct ViewerPagerView: UIViewControllerRepresentable {
     func updateUIViewController(_ owner: UIViewController, context: Context) {
         guard let view = owner.view as? UICollectionView else { return }
         context.coordinator.parent = self
+        view.isScrollEnabled = model.photo.zoom.pagingEnabled
         // Observe the window here, rather than only inside the UIKit data source.
         context.coordinator.update(view, items: session.items)
     }
@@ -50,7 +51,9 @@ struct ViewerPagerView: UIViewControllerRepresentable {
 
         func update(_ view: UICollectionView, items: [TimelineItem]) {
             // A window rebase/prepend must not change the page underneath an unfinished swipe.
-            guard !applying, !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
+            guard !applying else { return }
+            view.isScrollEnabled = parent.model.photo.zoom.pagingEnabled
+            guard !view.isTracking, !view.isDragging, !view.isDecelerating, !parent.model.photo.zoom.pinching else { return }
             let nextSize = view.bounds.size
             guard nextSize.width > 0, nextSize.height > 0 else { return }
             guard rendered != items || size != nextSize else { return }
@@ -116,7 +119,9 @@ private struct ViewerMediaPage: View {
             } else if let player = model.player {
                 VideoPlayer(player: player)
             } else if let image = model.image {
-                Image(decorative: image, scale: 1).resizable().scaledToFit()
+                PhotoZoomView(state: model.photo.zoom, epoch: model.photo.zoom.epoch, image: image) {
+                    model.photo.request(scale: $0)
+                }
             } else if let message = model.message {
                 ContentUnavailableView {
                     Label("表示できません", systemImage: "exclamationmark.triangle")

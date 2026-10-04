@@ -4,7 +4,8 @@ import Observation
 
 @MainActor @Observable final class MediaViewerController {
     private(set) var activeItem: TimelineItem?
-    private(set) var image: CGImage?
+    let photo = PhotoResolution()
+    var image: CGImage? { photo.image }
     private(set) var player: AVPlayer?
     private(set) var message: String?
     private(set) var isLoading = false
@@ -55,7 +56,7 @@ import Observation
         }
         activeItem = item
         presentation = (item, viewport)
-        image = nil; player = nil; message = nil; isLoading = true
+        player = nil; message = nil; isLoading = true
         work = Task {
             do {
                 guard let target = try await resolve(item.id, item.libraryID), target.key.generation == item.generation else { throw ViewerFailure.changed }
@@ -87,7 +88,8 @@ import Observation
                     await opened.close(); stream = nil
                     try Task.checkCancellation()
                     guard try await resolve(item.id, item.libraryID)?.key == target.key else { throw ViewerFailure.changed }
-                    image = decoded
+                    try Task.checkCancellation()
+                    photo.install(decoded, isCurrent: { try await resolve(item.id, item.libraryID)?.key == target.key })
                 }
                 isLoading = false
             } catch {
@@ -135,12 +137,12 @@ import Observation
     private func requestStop(message: String?) -> Task<Void, Never> {
         if let cleanup { return cleanup }
         isClosing = true
-        work?.cancel(); playback?.cancel()
+        work?.cancel(); playback?.cancel(); photo.cancel()
         player?.pause(); player?.replaceCurrentItem(with: nil)
         let task = Task {
             await work?.value
             await releaseResources()
-            work = nil; image = nil; isLoading = false
+            work = nil; isLoading = false
             self.message = message
             cleanup = nil; isClosing = false
             startPendingSelection()
@@ -150,6 +152,7 @@ import Observation
         return task
     }
     private func releaseResources() async {
+        await photo.clear()
         awaitingAutoplay = false
         observation?.invalidate(); observation = nil
         player?.pause(); player?.replaceCurrentItem(with: nil); player = nil

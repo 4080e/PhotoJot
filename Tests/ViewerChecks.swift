@@ -45,7 +45,9 @@ actor ViewerReadProbe {
         let image = try await PhotoViewerImage.load(size: UInt64(jpeg.count), viewport: viewport, directory: root) { offset, count in
             jpeg.subdata(in: Int(offset)..<(Int(offset)+count))
         }
-        check(image.width == 200 && image.height == 300)
+        check(image.image.width == 200 && image.image.height == 300)
+        check(FileManager.default.fileExists(atPath: image.original.url.path))
+        image.original.remove()
         check(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
         do {
             _ = try await PhotoViewerImage.load(size: 100, viewport: viewport, directory: root) { _,_ in throw CocoaError(.fileReadUnknown) }
@@ -58,6 +60,8 @@ actor ViewerReadProbe {
         do { _ = try await cancelled.value; preconditionFailure("cancel") } catch is CancellationError { }
         check(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
 
+        let orphans = try FileManager.default.contentsOfDirectory(atPath: PhotoOriginal.directory.path)
+        check(orphans.isEmpty)
         let movie = try await VideoThumbnailFixture.make()
         let repo = try MediaRepository(url: root.appendingPathComponent("index.store"))
         var settings = SMBConnectionSettings(); settings.host = "test"; settings.share = "photos"; settings.username = "test"
@@ -76,7 +80,13 @@ actor ViewerReadProbe {
         await wait { !model.isLoading }
         check(model.image != nil && model.message == nil)
         check(await photoProbe.closes == 1)
-        await model.stop(); check(model.image == nil)
+        let originalReads = await photoProbe.reads
+        model.photo.zoom.scale = 2
+        model.photo.request(scale: 2)
+        await model.photo.waitForDecode()
+        check(model.image!.height == 600)
+        check(await photoProbe.reads == originalReads) // refinement is local-only
+        await model.stop(); check(model.image == nil && model.photo.zoom.scale == 1)
         check(await photoProbe.closes == 1)
         // 写真取得中に閉じてもreaderを早期解放せず、遅れて返った画像を表示しない。
         let photoClosingProbe = ViewerReadProbe(jpeg, hold: true)
@@ -114,6 +124,17 @@ actor ViewerReadProbe {
         check(opens == 2)
         resume.scenePhaseChanged(.inactive)
         check(resume.image != nil && opens == 2)
+        resume.photo.zoom.scale = 2
+        resume.photo.request(scale: 2); await resume.photo.waitForDecode()
+        let retained = try FileManager.default.contentsOfDirectory(at: PhotoOriginal.directory, includingPropertiesForKeys: nil)
+        check(retained.count == 1)
+        resume.scenePhaseChanged(.background)
+        await wait { !resume.isClosing }
+        check(resume.image == nil && resume.photo.zoom.scale == 1)
+        check(!FileManager.default.fileExists(atPath: retained[0].path))
+        resume.scenePhaseChanged(.active)
+        await wait { resume.image != nil }
+        check(resume.image!.height == 300 && resume.photo.zoom.scale == 1)
         await resume.stop()
 
         let dismissProbe = ViewerReadProbe(jpeg, hold: true)
@@ -172,9 +193,11 @@ actor ViewerReadProbe {
         })
         mixed.select(item: photo, viewport: viewport)
         await wait { mixed.image != nil }
+        mixed.photo.zoom.scale = 2
+        mixed.photo.request(scale: 2); await mixed.photo.waitForDecode()
         mixed.select(item: video, viewport: viewport)
         await wait { mixed.player?.rate == 1 }
-        check(mixed.activeItem == video && mixed.image == nil)
+        check(mixed.activeItem == video && mixed.image == nil && mixed.photo.zoom.pagingEnabled)
         mixed.scenePhaseChanged(.background); mixed.scenePhaseChanged(.active)
         await wait { !mixed.isClosing && mixed.player?.rate == 1 }
         check(mixed.activeItem == video && mixedOpens == [photo.id, video.id, video.id])
@@ -182,6 +205,10 @@ actor ViewerReadProbe {
         await wait { mixed.image != nil }
         check(mixed.player == nil && mixed.activeItem == photo)
         check(await mixedVideo.closes == 2)
+        mixed.photo.zoom.scale = 2
+        mixed.setEditing(true)
+        await wait { !mixed.isClosing }
+        check(mixed.image == nil && mixed.photo.zoom.scale == 1)
         await mixed.stop()
 
         // Closing during selection cleanup drops the pending page permanently.
@@ -222,6 +249,10 @@ actor ViewerReadProbe {
         await wait { playback.player?.currentItem?.status == .readyToPlay || playback.message != nil }
         check(playback.player?.currentItem?.status == .readyToPlay)
         await wait { playback.player?.rate == 1 }
+        playback.player?.pause()
+        let sought = await playback.player!.seek(to: CMTime(seconds: 0.4, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        check(sought && abs(playback.player!.currentTime().seconds - 0.4) < 0.1)
+        playback.player?.play()
         check(await videoProbe.maximumRead < movie.count)
         playback.scenePhaseChanged(.background)
         await wait { await videoProbe.closes == 1 }
@@ -246,6 +277,7 @@ actor ViewerReadProbe {
         check(await blocked.closes == 1)
         check(await blocked.reads == 1)
         check(try await timeline.page(libraryID: library).items.map(\.id) == page.items.map(\.id))
+        check(try FileManager.default.contentsOfDirectory(atPath: PhotoOriginal.directory.path).isEmpty)
         print("PASS: photo source/viewport/orientation/temp cleanup, cancellation, generation rejection, viewer close, AVPlayer via range, no full predownload, background shutdown, drain-before-close, local timeline retained")
     }
 }

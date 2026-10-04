@@ -15,6 +15,6 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   PhotoJot/Thumbnails/RangeThumbnailCore.swift PhotoJot/Thumbnails/RangeThumbnailLoader.swift \
   PhotoJot/Thumbnails/JPEGThumbnailLocator.swift PhotoJot/Thumbnails/ThumbnailImages.swift \
   PhotoJot/Viewer/FullPhotoCore.swift PhotoJot/Viewer/FullPhotoImages.swift PhotoJot/Viewer/MediaViewerSource.swift \
-  PhotoJot/Viewer/RangePlaybackPolicy.swift PhotoJot/Viewer/MediaPlaybackResource.swift PhotoJot/Viewer/MediaViewerController.swift \
+  PhotoJot/Viewer/RangePlaybackPolicy.swift PhotoJot/Viewer/MediaPlaybackResource.swift PhotoJot/Viewer/PhotoResolution.swift PhotoJot/Viewer/MediaViewerController.swift \
   Tests/Fixtures/VideoThumbnailFixture.swift Tests/ViewerChecks.swift -o "$check_dir/checks"
 "$check_dir/checks" "$check_dir/files"
