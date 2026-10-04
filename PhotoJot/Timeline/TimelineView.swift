@@ -3,6 +3,7 @@ import SwiftUI
 struct TimelineView: View {
     @Environment(MediaViewerController.self) private var viewer
     @State private var viewingItem: TimelineItem?
+    @State private var viewerReturnItem: TimelineItem?
     @State private var selectingMonth = false
     @State private var model: TimelineController
     private let repository: TimelineRepository
@@ -41,7 +42,7 @@ struct TimelineView: View {
             } else {
                 TimelineGridView(model: model, thumbnails: thumbnails,
                                  sections: model.blocks.map { TimelineGridSection(id: $0.id, title: model.heading(for: $0), items: $0.items) },
-                                 contentVersion: model.contentVersion, jumpID: model.displayGeneration,
+                                 contentVersion: model.contentVersion, jumpID: model.displayGeneration, scrollRequest: model.scrollRequest,
                                  footer: AnyView(footer), footerHeight: model.errorMessage == nil ? 60 : 120,
                                  select: { if !viewer.isClosing { viewingItem = $0 } },
                                  inspect: { item in
@@ -61,8 +62,14 @@ struct TimelineView: View {
                 }
             }
         }
-        .fullScreenCover(item: $viewingItem) { item in
-            MediaViewerView(item: item, model: viewer, repository: repository, thumbnails: thumbnails)
+        .fullScreenCover(item: $viewingItem, onDismiss: {
+            guard let item = viewerReturnItem else { return }
+            viewerReturnItem = nil
+            Task { await model.returnFromViewer(to: item) }
+        }) { item in
+            MediaViewerView(item: item, model: viewer, repository: repository, thumbnails: thumbnails) {
+                viewerReturnItem = $0
+            }
         }
         .sheet(isPresented: $selectingMonth) { TimelineMonthPicker(model: model) }
         .navigationTitle(model.displayedMonth?.title ?? "年月")
@@ -78,7 +85,7 @@ struct TimelineView: View {
                 .buttonStyle(.plain)
                 .accessibilityHint("年月を選択して移動")
             }
-            if model.selectedMonth != nil {
+            if model.selectedMonth != nil || model.isViewerWindow {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("最新") { Task { await model.jump(to: nil) } }
                         .disabled(model.isLoading)

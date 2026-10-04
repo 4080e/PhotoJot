@@ -85,6 +85,12 @@ private actor ViewerFeed {
         let missing = ViewerSession(item: item(800), source: missingFeed.source())
         missing.begin(); await missing.waitForSupply()
         check(missing.currentItem.id == item(800).id && missing.errorMessage != nil, "missing anchor never silently selects another media")
+        let closing = ViewerSession(item: item(800), source: feed.source())
+        closing.commit(item(799)); closing.commit(item(798)); closing.commit(item(797))
+        let lastSettled = closing.close()
+        closing.commit(item(796)) // A late settle callback after close must not replace D.
+        await closing.waitForSupply()
+        check(lastSettled.id == item(797).id && closing.currentItem.id == lastSettled.id, "close returns last committed D and freezes selection")
         let stopped = ViewerSession(item: item(800), source: feed.source())
         stopped.begin(); stopped.close(); await stopped.waitForSupply()
         stopped.commit(item(1))

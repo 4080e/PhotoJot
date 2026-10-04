@@ -35,10 +35,22 @@ nonisolated struct TimelinePageSource: Sendable {
     func prepend(_ values: [TimelineItem]) { items.insert(contentsOf: values, at: 0) }
 }
 
+struct TimelineScrollRequest: Equatable {
+    let id = UUID()
+    let mediaID: UUID
+}
+
 @MainActor @Observable final class TimelineController {
     private(set) var blocks: [TimelineBlock] = []
     private(set) var loadedCount = 0
-    private(set) var isLoading = false
+    private(set) var isLoading = false {
+        didSet {
+            if !isLoading {
+                let waiting = idleWaiters; idleWaiters = []
+                waiting.forEach { $0.resume() }
+            }
+        }
+    }
     private(set) var hasLoaded = false
     private(set) var hasMore = false
     private(set) var hasNewer = false
@@ -52,6 +64,36 @@ nonisolated struct TimelinePageSource: Sendable {
     private(set) var displayGeneration = UUID()
     private(set) var selectedMonth: TimelineMonth?
     private(set) var displayedMonth: TimelineMonth?
+    private(set) var isViewerWindow = false
+    private(set) var scrollRequest: TimelineScrollRequest?
+    @ObservationIgnored private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func consumeScrollRequest(_ id: UUID) {
+        if scrollRequest?.id == id { scrollRequest = nil }
+    }
+
+    func returnFromViewer(to item: TimelineItem) async {
+        while isLoading { await withCheckedContinuation { idleWaiters.append($0) } }
+        guard !Task.isCancelled, item.libraryID == libraryID else { return }
+        if blocks.contains(where: { $0.items.contains(where: { $0.id == item.id }) }) {
+            scrollRequest = TimelineScrollRequest(mediaID: item.id)
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let page = try await source.anchorPage(item.libraryID, item)
+            try Task.checkCancellation()
+            guard page.items.contains(where: { $0.id == item.id }) else { return }
+            reset(preservingViewport: true)
+            isViewerWindow = true
+            errorMessage = nil
+            append(page)
+            configureNewer(page, preservingViewport: true)
+            scrollRequest = TimelineScrollRequest(mediaID: item.id)
+        } catch is CancellationError { }
+        catch { errorMessage = error.localizedDescription }
+    }
 
     // 閲覧位置からの表示専用通知。ジャンプ・ページングの状態には触れない。
     func updateDisplayedMonth(_ month: TimelineMonth?) {
@@ -237,6 +279,8 @@ nonisolated struct TimelinePageSource: Sendable {
         hasLoaded = false; hasMore = false; cursor = nil; loadTriggerIDs = []
         newerCursor = nil; hasNewer = false; newerErrorMessage = nil
         if !preservingViewport {
+            scrollRequest = nil
+            isViewerWindow = false
             visibleItemID = nil
             // 初回／明示的な年月ジャンプ・最新操作だけの一回限りの位置指定。
             displayGeneration = UUID()

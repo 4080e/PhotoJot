@@ -14,6 +14,7 @@ struct TimelineGridView: UIViewRepresentable {
     let sections: [TimelineGridSection]
     let contentVersion: Int
     let jumpID: UUID
+    var scrollRequest: TimelineScrollRequest? = nil
     let footer: AnyView
     let footerHeight: CGFloat
     let select: (TimelineItem) -> Void
@@ -45,6 +46,7 @@ struct TimelineGridView: UIViewRepresentable {
         var titles: [UUID: String] = [:]
         var appliedVersion: Int?
         var consumedJumpID: UUID?
+        var consumedReturnID: UUID?
         var applying = false
         var lastOffset: CGFloat = 0
         private var reportedMonth: TimelineMonth?
@@ -94,7 +96,10 @@ struct TimelineGridView: UIViewRepresentable {
             for supplement in view.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionFooter) {
                 (supplement as? TimelineSupplement)?.show(value.footer)
             }
-            guard appliedVersion != value.contentVersion || consumedJumpID != value.jumpID else { return }
+            guard appliedVersion != value.contentVersion || consumedJumpID != value.jumpID else {
+                applyReturnRequest(in: view)
+                return
+            }
             guard !applying else { return }
             view.layoutIfNeeded()
             let jump = consumedJumpID != value.jumpID
@@ -130,6 +135,23 @@ struct TimelineGridView: UIViewRepresentable {
             applying = false
             lastOffset = view.contentOffset.y
             recordViewport(view)
+            applyReturnRequest(in: view)
+        }
+
+        private func applyReturnRequest(in view: UICollectionView) {
+            guard !applying, let request = parent.scrollRequest,
+                  consumedReturnID != request.id,
+                  let path = dataSource.indexPath(for: request.mediaID) else { return }
+            consumedReturnID = request.id
+            applying = true
+            view.layoutIfNeeded()
+            view.scrollToItem(at: path, at: .centeredVertically, animated: false)
+            view.layoutIfNeeded()
+            applying = false
+            lastOffset = view.contentOffset.y
+            recordViewport(view)
+            let model = parent.model
+            Task { @MainActor in model.consumeScrollRequest(request.id) }
         }
 
         func recordViewport(_ view: UICollectionView) {

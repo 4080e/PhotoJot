@@ -348,6 +348,45 @@ private actor PageFeed {
         anchored.updateDisplayedMonth(item(701, date: nil).date.month)
         check(anchored.displayedMonth == TimelineMonth(year: 2025, month: 12), "unknown date retains last month")
         check(anchored.displayGeneration == titleJumpID && anchored.contentVersion == titleVersion && anchored.visibleItemID == titleAnchor, "title update never changes viewport or paging")
+        let returnFeed = PageFeed(pages: [page(first, more: true), page(second, more: true), page(third, more: false)])
+        var returnSource = TimelinePageSource(prepare: { lib }, page: { _, cursor in try await returnFeed.read(after: cursor) },
+                                              anchorPage: { _, _ in try await returnFeed.read(after: nil) })
+        returnSource.newerPage = { _, cursor in try await returnFeed.read(after: cursor) }
+        let returning = TimelineController(source: returnSource)
+        await returning.loadInitial()
+        await returning.returnFromViewer(to: first[80])
+        check(await returnFeed.requestCount() == 1 && returning.scrollRequest?.mediaID == first[80].id, "loaded viewer destination requires no fetch")
+        let consumed = returning.scrollRequest!.id
+        returning.consumeScrollRequest(consumed)
+        check(returning.scrollRequest == nil, "one-shot consumed")
+        await returnFeed.suspend()
+        let paging = Task { await returning.loadMoreIfNeeded(visibleID: first.last!.id) }
+        await returnFeed.waitForRead()
+        let restore = Task { await returning.returnFromViewer(to: second[0]) }
+        await Task.yield()
+        check(returning.scrollRequest == nil, "return waits for in-flight page")
+        await returnFeed.release(); await paging.value; await restore.value
+        check(await returnFeed.requestCount() == 2 && returning.scrollRequest?.mediaID == second[0].id, "completed page supplies destination without extra query")
+        await returning.returnFromViewer(to: third[0])
+        check(await returnFeed.requestCount() == 3 && returning.blocks.first?.items.first?.id == third[0].id, "unloaded viewer destination uses anchor page")
+        check(returning.hasNewer && returning.isViewerWindow, "unknown-date return supports newer and latest action")
+        returning.consumeScrollRequest(consumed)
+        check(returning.scrollRequest?.mediaID == third[0].id, "old acknowledgement cannot consume newer request")
+
+        let localReturn = TimelineController(source: .local(repository: timeline, settings: jumpSettings))
+        await localReturn.loadInitial()
+        let returnTarget = entireJump[3]
+        await localReturn.returnFromViewer(to: returnTarget)
+        check(localReturn.scrollRequest?.mediaID == returnTarget.id && localReturn.blocks.first?.items.first?.id == returnTarget.id, "real around query returns exact viewer item")
+        localReturn.consumeScrollRequest(localReturn.scrollRequest!.id)
+        await localReturn.loadMoreIfNeeded(visibleID: localReturn.blocks.last!.items.last!.id)
+        await localReturn.loadNewer()
+        let returnedItems = localReturn.blocks.flatMap(\.items)
+        check(returnedItems.count > 200 && Set(returnedItems.map(\.id)).count == returnedItems.count, "return supports both directions without duplicates")
+        check(returnedItems.map(\.sortKey) == returnedItems.map(\.sortKey).sorted(by: >) && localReturn.scrollRequest == nil, "paging preserves order without reissuing return")
+        await localReturn.jump(to: nil)
+        check(!localReturn.isViewerWindow && !localReturn.hasNewer && localReturn.scrollRequest == nil, "latest restores normal paging")
+        print("PASS: viewer return loaded/unloaded, in-flight paging, one-shot consumption, bidirectional continuation")
         print("PASS: observed month title, month/year boundary, unknown date stability, observation-only update")
         print("PASS: bidirectional pages, bounds, stable ties, independent cursors, anchor retention, shared exclusion")
         print("PASS: month candidates, direct month start, month/year boundaries, stable ties, next page, unknown tail, latest return")

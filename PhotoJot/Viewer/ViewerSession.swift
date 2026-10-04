@@ -38,7 +38,10 @@ import Observation
     }
 
     func retry() { errorMessage = nil; requestSupply() }
-    func close() { isClosed = true; epoch += 1; work?.cancel() }
+    @discardableResult func close() -> TimelineItem {
+        isClosed = true; epoch += 1; work?.cancel()
+        return currentItem
+    }
     func waitForSupply() async { await work?.value }
 
     private func requestSupply() {

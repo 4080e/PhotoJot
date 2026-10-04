@@ -36,7 +36,6 @@ struct TimelineThumbnailCell: View {
 
     func run(in root: UIViewController) async {
         let library = UUID()
-        let model = TimelineController(source: TimelinePageSource(prepare: { library }, page: { _, _ in TimelinePage(items: [], next: nil, revision: 1) }))
         let session = ThumbnailSession()
         func items(_ range: Range<Int>) -> [TimelineItem] {
             range.map { number in
@@ -46,9 +45,11 @@ struct TimelineThumbnailCell: View {
             }
         }
         let original = items(0..<400), newer = items(1000..<1200), newest = items(1200..<1400)
+        let model = TimelineController(source: TimelinePageSource(prepare: { library }, page: { _, _ in TimelinePage(items: original, next: nil, revision: 1) }))
+        await model.loadInitial()
         let oldSection = UUID(), newSection = UUID(), jump = UUID()
         func value(_ sections: [TimelineGridSection], _ version: Int, _ jumpID: UUID = jump) -> TimelineGridView {
-            TimelineGridView(model: model, thumbnails: session, sections: sections, contentVersion: version, jumpID: jumpID,
+            TimelineGridView(model: model, thumbnails: session, sections: sections, contentVersion: version, jumpID: jumpID, scrollRequest: model.scrollRequest,
                              footer: AnyView(Text("test")), footerHeight: 60, select: { _ in }, inspect: { _ in })
         }
         let initial = value([.init(id: oldSection, title: "2023年12月31日", items: original)], 1)
@@ -93,6 +94,23 @@ struct TimelineThumbnailCell: View {
         verify(moved, "revision rebase uses viewport coordinate")
         coordinator.update(value([.init(id: oldSection, title: "latest", items: original)], 5, UUID()), in: view)
         precondition(abs(view.contentOffset.y + view.adjustedContentInset.top) < 1, "explicit latest jumps once")
+        let returnJump = UUID()
+        let returnSections: [TimelineGridSection] = [.init(id: oldSection, title: "return", items: original)]
+        await model.returnFromViewer(to: original[180])
+        coordinator.update(value(returnSections, 6, returnJump), in: view)
+        let returnedPath = coordinator.dataSource.indexPath(for: original[180].id)!
+        precondition(view.indexPathsForVisibleItems.contains(returnedPath), "returned item visible")
+        await Task.yield()
+        precondition(model.scrollRequest == nil && model.displayedMonth == original[180].date.month, "return consumed and month follows viewport")
+        view.setContentOffset(CGPoint(x: 0, y: view.contentOffset.y + 400), animated: false)
+        let afterReturn = coordinator.anchor(in: view)!
+        coordinator.update(value(returnSections, 6, returnJump), in: view)
+        verify(afterReturn, "thumbnail update cannot reapply return")
+        coordinator.update(value(returnSections, 7, returnJump), in: view)
+        verify(afterReturn, "content update cannot reapply return")
+        coordinator.update(value(secondSections, 8, returnJump), in: view)
+        verify(afterReturn, "prepend after return keeps user viewport")
+        print("PASS: viewer return visible, consumed once, month observation, no snap back on content or prepend")
         print("PASS: UIKit measured anchor survives 200-item prepend, day boundary, second prepend after user scrolling, repeat layout, unchanged snapshot, revision rebase; explicit jump consumed once")
         fflush(stdout)
         exit(0)

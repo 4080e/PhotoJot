@@ -5,13 +5,15 @@ struct MediaViewerView: View {
     @State private var session: ViewerSession
     let thumbnails: ThumbnailSession
     let model: MediaViewerController
+    let onClose: (TimelineItem) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var scale
     @ScaledMetric(relativeTo: .footnote) private var informationMaximumHeight = 104.0
     @State private var informationContentHeight: CGFloat = 0
-    init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository, thumbnails: ThumbnailSession) {
+    init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository, thumbnails: ThumbnailSession, onClose: @escaping (TimelineItem) -> Void) {
         self.thumbnails = thumbnails
         self.model = model
+        self.onClose = onClose
         let source = TimelinePageSource(prepare: { item.libraryID },
                                         page: { try await repository.page(libraryID: $0, after: $1) },
                                         newerPage: { try await repository.newerPage(libraryID: $0, before: $1) },
@@ -44,7 +46,10 @@ struct MediaViewerView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { session.close(); Task { await model.stop(); dismiss() } }.disabled(model.isClosing)
+                    Button("閉じる") {
+                        let lastItem = session.close()
+                        Task { await model.stop(); onClose(lastItem); dismiss() }
+                    }.disabled(model.isClosing)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)

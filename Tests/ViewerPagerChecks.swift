@@ -188,7 +188,13 @@ private final class DraggingCollection: ViewerCollectionView {
         precondition(players(root).first?.player === retainedPlayer, "same player survives cell reattachment")
         cell.prepareForReuse()
         precondition(root.children.isEmpty, "reuse removes child controller containment")
-        session.close()
+        let settledBeforeClose = session.currentItem
+        view.simulatedDrag = true
+        view.setContentOffset(CGPoint(x: view.contentOffset.x + resized.width * 0.6, y: 0), animated: false)
+        let returnItem = session.close()
+        view.simulatedDrag = false
+        coordinator.scrollViewDidEndDecelerating(view)
+        precondition(returnItem == settledBeforeClose && session.currentItem == settledBeforeClose, "closing during swipe returns only last settled media")
         print("PASS: Viewer UIKit paging, settled selection, mixed IDs, deferred window replacement, anchor retention, point sizing, rotation, cached placeholders, full-image replacement and VideoPlayer containment")
         fflush(stdout)
         exit(0)
