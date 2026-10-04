@@ -32,6 +32,7 @@ import AVKit
         Task { await run(root) }
     }
     func run(_ root: UIViewController) async {
+        await checkViewerDismiss(root)
         let state = PhotoZoomState()
         state.aspectRatio = 0.75
         let image = UIGraphicsImageRenderer(size: CGSize(width: 900, height: 1200)).image { c in UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 900, height: 1200)) }.cgImage!
@@ -69,4 +70,82 @@ import AVKit
         print("PASS: photo zoom, pan gating, settled refinement, reload/reconfigure retention, high-resolution swap, stale page reset")
         fflush(stdout); exit(0)
     }
+}
+
+@MainActor private func checkViewerDismiss(_ root: UIViewController) async {
+    let view = UICollectionView(frame: CGRect(x: 0, y: 0, width: 320, height: 600), collectionViewLayout: UICollectionViewFlowLayout())
+    let container = ViewerPagerContainerController()
+    root.addChild(container)
+    container.install(view)
+    container.view.frame = CGRect(x: 0, y: 0, width: 320, height: 600)
+    root.view.addSubview(container.view)
+    container.didMove(toParent: root)
+    container.view.layoutIfNeeded()
+    // The previous root-view implementation loses visible translation when its
+    // parent reapplies frame, then exposes a negative origin on transform reset.
+    let previousRoot = UIView(frame: container.view.bounds)
+    previousRoot.transform = CGAffineTransform(translationX: 0, y: 120)
+    previousRoot.frame = container.view.bounds
+    precondition(previousRoot.frame.minY == 0)
+    previousRoot.transform = .identity
+    precondition(previousRoot.frame.minY == -120)
+    let gesture = ViewerDismissGesture()
+    var permitted = true
+    var paging = true
+    var progress: CGFloat = 0
+    var closes = 0
+    gesture.canBegin = { permitted }
+    gesture.pagingEnabled = { paging }
+    gesture.progress = { value, _ in progress = value }
+    gesture.completed = { closes += 1 }
+    gesture.install(on: view)
+    precondition(ViewerDismissGesture.downward(CGPoint(x: 100, y: 200)))
+    for velocity in [CGPoint(x: 200, y: 100), CGPoint(x: 100, y: 100), CGPoint(x: 0, y: -100)] {
+        precondition(!ViewerDismissGesture.downward(velocity))
+    }
+    precondition(ViewerDismissGesture.finishes(distance: 150, velocity: .zero, height: 600))
+    precondition(!ViewerDismissGesture.finishes(distance: 149, velocity: .zero, height: 600))
+    precondition(ViewerDismissGesture.finishes(distance: 44, velocity: CGPoint(x: 0, y: 900), height: 600))
+    precondition(!ViewerDismissGesture.finishes(distance: 20, velocity: CGPoint(x: 0, y: 1000), height: 600))
+    precondition(!ViewerDismissGesture.finishes(distance: 200, velocity: CGPoint(x: 0, y: -100), height: 600))
+    let button = UIButton(); let label = UILabel(); button.addSubview(label); view.addSubview(button)
+    precondition(ViewerDismissGesture.isControl(label, within: view))
+    let slider = UISlider(); view.addSubview(slider)
+    precondition(ViewerDismissGesture.isControl(slider, within: view))
+    let playerSurface = UIView(); view.addSubview(playerSurface)
+    let playerPan = UIPanGestureRecognizer(); playerSurface.addGestureRecognizer(playerPan)
+    gesture.isVideo = { true }
+    precondition(gesture.gestureRecognizer(gesture.pan, shouldRequireFailureOf: playerPan))
+    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRequireFailureOf: view.panGestureRecognizer))
+    gesture.isVideo = { false }
+    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRequireFailureOf: playerPan))
+    permitted = false; gesture.begin(); precondition(!gesture.isBusy)
+    permitted = true; gesture.begin(); gesture.move(to: 120)
+    precondition(!view.isScrollEnabled && view.transform.ty == 120 && progress == 0.2)
+    // Reproduce the representable root layout performed after each progress update.
+    for distance: CGFloat in [20, 60, 120] {
+        gesture.move(to: distance)
+        container.view.frame = CGRect(x: 0, y: 0, width: 320, height: 600)
+        container.view.setNeedsLayout(); container.view.layoutIfNeeded()
+        precondition(view.convert(.zero, to: container.view).y == distance,
+                     "visible media follows translation through parent relayout")
+        precondition(view.contentOffset == .zero && container.view.transform == .identity)
+    }
+    paging = false; gesture.cancel(animated: false)
+    precondition(!gesture.isBusy && !view.isScrollEnabled && view.transform == .identity && progress == 0 && closes == 0)
+    paging = true; gesture.begin(); gesture.move(to: 80)
+    NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+    precondition(!gesture.isBusy && view.isScrollEnabled && view.transform == .identity && progress == 0 && closes == 0)
+    gesture.begin(); gesture.finishDrag()
+    NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+    let deadline = Date().addingTimeInterval(0.4)
+    while Date() < deadline { await Task.yield() }
+    precondition(closes == 0 && !gesture.isBusy, "interruption invalidates animation completion")
+    gesture.begin(); gesture.finishDrag(); gesture.finishDrag()
+    let finishDeadline = Date().addingTimeInterval(2)
+    while closes == 0 && Date() < finishDeadline { await Task.yield() }
+    precondition(closes == 1, "one completion closes via the shared route")
+    gesture.detach()
+    container.willMove(toParent: nil); container.view.removeFromSuperview(); container.removeFromParent()
+    print("PASS: viewer dismiss direction, controls, zoom gate, cancellation, interruption, single completion")
 }

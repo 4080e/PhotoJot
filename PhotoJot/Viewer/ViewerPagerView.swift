@@ -8,17 +8,19 @@ struct ViewerPagerView: UIViewControllerRepresentable {
     let model: MediaViewerController
     let viewport: FullPhotoViewport
     let thumbnails: ThumbnailSession
+    var dismissProgress: (CGFloat, Bool) -> Void = { _, _ in }
+    var dismissRequested: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIViewController(context: Context) -> UIViewController {
-        let owner = UIViewController()
+        let owner = ViewerPagerContainerController()
         context.coordinator.owner = owner
         let layout = ViewerPageLayout()
         layout.scrollDirection = .horizontal
         layout.minimumLineSpacing = 0
         layout.minimumInteritemSpacing = 0
         let view = ViewerCollectionView(frame: .zero, collectionViewLayout: layout)
-        view.backgroundColor = .black
+        view.backgroundColor = .clear
         view.isPagingEnabled = true
         view.showsHorizontalScrollIndicator = false
         view.contentInsetAdjustmentBehavior = .never
@@ -30,30 +32,52 @@ struct ViewerPagerView: UIViewControllerRepresentable {
             guard let coordinator else { return }
             coordinator.update(view, items: coordinator.parent.session.items)
         }
-        owner.view = view
+        owner.install(view)
+        context.coordinator.installDismiss(on: view)
         return owner
     }
     func updateUIViewController(_ owner: UIViewController, context: Context) {
-        guard let view = owner.view as? UICollectionView else { return }
+        guard let view = (owner as? ViewerPagerContainerController)?.collectionView else { return }
         context.coordinator.parent = self
-        view.isScrollEnabled = model.photo.zoom.pagingEnabled
+        view.isScrollEnabled = model.photo.zoom.pagingEnabled && !context.coordinator.dismissGesture.isBusy
         // Observe the window here, rather than only inside the UIKit data source.
         context.coordinator.update(view, items: session.items)
+    }
+
+    static func dismantleUIViewController(_ owner: UIViewController, coordinator: Coordinator) {
+        coordinator.dismissGesture.detach()
     }
 
     @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
         var parent: ViewerPagerView
         weak var owner: UIViewController?
+        let dismissGesture = ViewerDismissGesture()
         private var rendered: [TimelineItem] = []
         private var size: CGSize = .zero
         private var applying = false
         init(_ parent: ViewerPagerView) { self.parent = parent }
 
+        func installDismiss(on view: UICollectionView) {
+            dismissGesture.canBegin = { [weak self] in
+                guard let self else { return false }
+                return !self.parent.session.isClosed && !self.parent.model.isClosing && self.parent.model.photo.zoom.pagingEnabled
+            }
+            dismissGesture.pagingEnabled = { [weak self] in self?.parent.model.photo.zoom.pagingEnabled ?? false }
+            dismissGesture.isVideo = { [weak self] in self?.parent.session.currentItem.mediaType == "video" }
+            dismissGesture.progress = { [weak self] value, animated in self?.parent.dismissProgress(value, animated) }
+            dismissGesture.completed = { [weak self] in self?.parent.dismissRequested() }
+            dismissGesture.restored = { [weak self, weak view] in
+                guard let self, let view else { return }
+                self.update(view, items: self.parent.session.items)
+            }
+            dismissGesture.install(on: view)
+        }
+
         func update(_ view: UICollectionView, items: [TimelineItem]) {
             // A window rebase/prepend must not change the page underneath an unfinished swipe.
             guard !applying else { return }
-            view.isScrollEnabled = parent.model.photo.zoom.pagingEnabled
-            guard !view.isTracking, !view.isDragging, !view.isDecelerating, !parent.model.photo.zoom.pinching else { return }
+            view.isScrollEnabled = parent.model.photo.zoom.pagingEnabled && !dismissGesture.isBusy
+            guard !dismissGesture.isBusy, !view.isTracking, !view.isDragging, !view.isDecelerating, !parent.model.photo.zoom.pinching else { return }
             let nextSize = view.bounds.size
             guard nextSize.width > 0, nextSize.height > 0 else { return }
             guard rendered != items || size != nextSize else { return }
@@ -94,7 +118,7 @@ struct ViewerPagerView: UIViewControllerRepresentable {
             if !decelerate { settle(scrollView) }
         }
         private func settle(_ scrollView: UIScrollView) {
-            guard !parent.session.isClosed, let view = scrollView as? UICollectionView, size.width > 0, !rendered.isEmpty else { return }
+            guard !dismissGesture.isBusy, !parent.session.isClosed, let view = scrollView as? UICollectionView, size.width > 0, !rendered.isEmpty else { return }
             let index = min(rendered.count - 1, max(0, Int((view.contentOffset.x / size.width).rounded())))
             parent.session.commit(rendered[index])
             parent.model.select(item: parent.session.currentItem, viewport: parent.viewport)
@@ -111,7 +135,7 @@ private struct ViewerMediaPage: View {
     let thumbnails: ThumbnailSession
     var body: some View {
         ZStack {
-            Color.black
+            Color.clear
             if item.id != session.currentItem.id || item.generation != session.currentItem.generation {
                 placeholder(loading: false)
             } else if model.showsLoading || model.activeItem?.id != item.id || model.activeItem?.generation != item.generation {
@@ -233,5 +257,25 @@ final class ViewerPageCell: UICollectionViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         clear()
+    }
+}
+
+// SwiftUI owns the representable root's frame. Keep the transformed media view
+// below that boundary so progress-driven SwiftUI layout cannot counteract its translation.
+final class ViewerPagerContainerController: UIViewController {
+    private(set) var collectionView: UICollectionView?
+    func install(_ collectionView: UICollectionView) {
+        loadViewIfNeeded()
+        view.backgroundColor = .clear
+        self.collectionView = collectionView
+        view.addSubview(collectionView)
+    }
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard let collectionView else { return }
+        // Do not assign frame while transform is nonidentity: preserve translation
+        // and lay out the untransformed geometry explicitly.
+        collectionView.bounds.size = view.bounds.size
+        collectionView.center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
     }
 }

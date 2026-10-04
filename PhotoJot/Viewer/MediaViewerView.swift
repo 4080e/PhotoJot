@@ -9,6 +9,8 @@ struct MediaViewerView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var scale
     @ScaledMetric(relativeTo: .footnote) private var informationMaximumHeight = 104.0
+    @State private var dismissProgress: CGFloat = 0
+    @State private var closing = false
     @State private var informationContentHeight: CGFloat = 0
     init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository, thumbnails: ThumbnailSession, onClose: @escaping (TimelineItem) -> Void) {
         self.thumbnails = thumbnails
@@ -25,7 +27,11 @@ struct MediaViewerView: View {
         NavigationStack {
             GeometryReader { geometry in
                 let viewport = FullPhotoViewport(width: geometry.size.width, height: geometry.size.height, scale: scale)
-                ViewerPagerView(session: session, model: model, viewport: viewport, thumbnails: thumbnails)
+                ViewerPagerView(session: session, model: model, viewport: viewport, thumbnails: thumbnails,
+                                dismissProgress: { value, animated in
+                                    if animated { withAnimation(.easeOut(duration: 0.25)) { dismissProgress = value } }
+                                    else { dismissProgress = value }
+                                }, dismissRequested: { close(animated: false) })
                     .onChange(of: session.currentItem, initial: true) { _, item in
                         model.select(item: item, viewport: viewport)
                     }
@@ -42,18 +48,21 @@ struct MediaViewerView: View {
                     }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                information
+                information.opacity(1 - dismissProgress)
+                    .allowsHitTesting(dismissProgress == 0)
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("閉じる") {
-                        let lastItem = session.close()
-                        Task { await model.stop(); onClose(lastItem); dismiss() }
-                    }.disabled(model.isClosing)
+                        close(animated: true)
+                    }.disabled(model.isClosing || closing || dismissProgress > 0)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
         }
+        .background { Color.black.opacity(1 - dismissProgress).ignoresSafeArea() }
+        .presentationBackground(.clear)
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled()
         .task { session.begin() }
@@ -61,6 +70,19 @@ struct MediaViewerView: View {
             session.close()
             model.cancelAutomaticResume()
             Task { await model.stop() }
+        }
+    }
+
+    private func close(animated: Bool) {
+        guard !closing, !session.isClosed else { return }
+        closing = true
+        let lastItem = session.close()
+        Task {
+            await model.stop()
+            onClose(lastItem)
+            var transaction = Transaction()
+            transaction.disablesAnimations = !animated
+            withTransaction(transaction) { dismiss() }
         }
     }
 
