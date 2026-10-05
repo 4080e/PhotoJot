@@ -114,7 +114,7 @@ struct TimelineView: View {
                 HStack {
                     ProgressView()
                     Text(update.state == .cancelling ? "更新を中断中…" :
-                        (update.phase == .metadata ? "撮影日時を更新中…" : "ライブラリを更新中…"))
+                        (update.phase == .metadata ? metadataProgressText : "ライブラリを更新中…"))
                         .font(.footnote)
                     Spacer()
                 }.padding().background(.bar)
@@ -129,6 +129,13 @@ struct TimelineView: View {
         #if DEBUG
         .sheet(item: $selectedItem) { item in DeveloperMediaDetailsView(item: item) }
         #endif
+    }
+
+    private var metadataProgressText: String {
+        let progress = update.metadataProgress
+        guard progress.total > 0 else { return "撮影日時を更新中…" }
+        let format = IntegerFormatStyle<Int>.number.grouping(.automatic).locale(Locale(identifier: "ja_JP"))
+        return "撮影日時を更新中… \(progress.completed.formatted(format)) / \(progress.total.formatted(format))件"
     }
 
     @ViewBuilder private var footer: some View {
