@@ -74,20 +74,33 @@ actor ViewerReadProbe {
         let library = try await timeline.prepare(settings: settings)
         let page = try await timeline.page(libraryID: library)
         let photo = page.items.first { $0.mediaType == "photo" }!, video = page.items.first { $0.mediaType == "video" }!
+        let cache = ThumbnailCache(directory: root.appendingPathComponent("thumbnails"))
+        for item in [photo, video] { try await cache.save(jpeg, for: ThumbnailSession.placeholderKey(for: item)) }
+        let thumbnails = ThumbnailSession(cache: cache, resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
+            generate: { _ in preconditionFailure("preview must never generate or access NAS") }, disconnect: {})
         let photoProbe = ViewerReadProbe(jpeg)
         let model = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in photoProbe.stream })
         model.start(item: photo, viewport: viewport)
         await wait { !model.isLoading }
         check(model.image != nil && model.message == nil)
-        check(await photoProbe.closes == 1)
+        model.preparePreview(for: photo, thumbnails: thumbnails)
+        await wait { model.previewImage != nil }
+        let preview = model.previewImage
+        model.scenePhaseChanged(.background)
+        await wait { !model.isClosing }
+        check(model.image == nil && model.previewImage === preview && model.showsLoading)
+        model.scenePhaseChanged(.active)
+        await wait { !model.isLoading }
+        check(model.image != nil && model.previewImage === preview)
+        check(await photoProbe.closes == 2)
         let originalReads = await photoProbe.reads
         model.photo.zoom.scale = 2
         model.photo.request(scale: 2)
         await model.photo.waitForDecode()
         check(model.image!.height == 600)
         check(await photoProbe.reads == originalReads) // refinement is local-only
-        await model.stop(); check(model.image == nil && model.photo.zoom.scale == 1)
-        check(await photoProbe.closes == 1)
+        await model.stop(); check(model.image == nil && model.photo.zoom.scale == 1 && model.previewImage == nil)
+        check(await photoProbe.closes == 2)
         // 写真取得中に閉じてもreaderを早期解放せず、遅れて返った画像を表示しない。
         let photoClosingProbe = ViewerReadProbe(jpeg, hold: true)
         let photoClosing = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in photoClosingProbe.stream })
@@ -254,14 +267,18 @@ actor ViewerReadProbe {
         check(sought && abs(playback.player!.currentTime().seconds - 0.4) < 0.1)
         playback.player?.play()
         check(await videoProbe.maximumRead < movie.count)
+        playback.preparePreview(for: video, thumbnails: thumbnails)
+        await wait { playback.previewImage != nil }
+        let videoPreview = playback.previewImage
         playback.scenePhaseChanged(.background)
         await wait { await videoProbe.closes == 1 }
-        check(playback.player == nil && playback.showsLoading)
+        check(playback.player == nil && playback.showsLoading && playback.previewImage === videoPreview)
         playback.scenePhaseChanged(.active)
         playback.scenePhaseChanged(.active)
         await wait { playback.player?.rate == 1 }
         check(playback.message == nil && !playback.showsLoading)
         await playback.stop()
+        check(playback.previewImage == nil)
         check(await videoProbe.closes == 2)
         let blocked = ViewerReadProbe(movie, hold: true)
         let closing = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in blocked.stream })

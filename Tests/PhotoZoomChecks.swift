@@ -6,6 +6,8 @@ import AVKit
     let photo = PhotoResolution()
     var activeItem: TimelineItem?
     var showsLoading = false
+    var previewKey: ThumbnailKey?
+    var previewImage: CGImage?
     var player: AVPlayer?
     var image: CGImage?
     var message: String?

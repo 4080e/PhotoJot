@@ -34,9 +34,11 @@ struct MediaViewerView: View {
                                 }, dismissRequested: { close(animated: false) })
                     .onChange(of: session.currentItem, initial: true) { _, item in
                         model.select(item: item, viewport: viewport)
+                        model.preparePreview(for: item, thumbnails: thumbnails)
                     }
                     .onChange(of: geometry.size) { _, _ in
                         model.select(item: session.currentItem, viewport: viewport)
+                        model.preparePreview(for: session.currentItem, thumbnails: thumbnails)
                     }
                     .overlay(alignment: .top) {
                         if let message = session.errorMessage {

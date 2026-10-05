@@ -6,6 +6,10 @@ import Observation
     private(set) var activeItem: TimelineItem?
     let photo = PhotoResolution()
     var image: CGImage? { photo.image }
+    private(set) var previewKey: ThumbnailKey?
+    private(set) var previewImage: CGImage?
+    @ObservationIgnored private var previewWork: Task<Void, Never>?
+    @ObservationIgnored private var previewEpoch = UUID()
     private(set) var player: AVPlayer?
     private(set) var message: String?
     private(set) var isLoading = false
@@ -121,8 +125,35 @@ import Observation
         }
     }
 
+    // Keep only the current page's lightweight cache image, independently of media cleanup.
+    func preparePreview(for item: TimelineItem, thumbnails: ThumbnailSession) {
+        clearPreview()
+        guard !editing, presentation?.item == item || pendingSelection?.item == item else { return }
+        let key = ThumbnailSession.placeholderKey(for: item)
+        let epoch = previewEpoch
+        previewKey = key
+        previewImage = thumbnails.cachedImage(for: key)
+        previewWork = Task {
+            do {
+                let image = try await thumbnails.cachedImageOnly(for: key)
+                try Task.checkCancellation()
+                guard previewEpoch == epoch else { return }
+                previewImage = image
+            } catch is CancellationError {
+                // Background media cancellation must not remove an accepted preview.
+            } catch {
+                // A cache read failure leaves an already accepted lightweight image usable.
+            }
+        }
+    }
+    private func clearPreview() {
+        previewEpoch = UUID(); previewWork?.cancel(); previewWork = nil
+        previewKey = nil; previewImage = nil
+    }
+
     // 明示的な終了・手動再試行・設定変更は自動再開予約も破棄する。
     func cancelAutomaticResume() {
+        clearPreview()
         pendingSelection = nil
         presentation = nil
         resumeAfterBackground = false

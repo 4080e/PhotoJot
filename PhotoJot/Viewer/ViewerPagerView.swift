@@ -159,7 +159,8 @@ private struct ViewerMediaPage: View {
     }
     private func placeholder(loading: Bool) -> some View {
         let key = ThumbnailSession.placeholderKey(for: item)
-        return ViewerCachedThumbnail(key: key, thumbnails: thumbnails, video: item.mediaType == "video", loading: loading)
+        return ViewerCachedThumbnail(key: key, thumbnails: thumbnails, video: item.mediaType == "video", loading: loading,
+                                     retainedImage: model.previewKey == key ? model.previewImage : nil)
             .id(key)
     }
 }
@@ -169,16 +170,18 @@ private struct ViewerCachedThumbnail: View {
     let thumbnails: ThumbnailSession
     let video: Bool
     let loading: Bool
+    let retainedImage: CGImage?
     @State private var image: CGImage?
 
-    init(key: ThumbnailKey, thumbnails: ThumbnailSession, video: Bool, loading: Bool) {
+    init(key: ThumbnailKey, thumbnails: ThumbnailSession, video: Bool, loading: Bool, retainedImage: CGImage? = nil) {
         self.key = key; self.thumbnails = thumbnails; self.video = video; self.loading = loading
+        self.retainedImage = retainedImage
         // 同じキーのdecode済み画像なら初回描画から利用する。
         _image = State(initialValue: thumbnails.cachedImage(for: key))
     }
     var body: some View {
         Group {
-            if let image {
+            if let image = retainedImage ?? image {
                 Image(decorative: image, scale: 1).resizable().scaledToFit()
                     .overlay {
                         if loading {
