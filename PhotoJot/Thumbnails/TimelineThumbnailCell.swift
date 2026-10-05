@@ -7,16 +7,31 @@ struct TimelineThumbnailCell: View {
     private struct Accepted {
         let request: RequestID
         let key: ThumbnailKey
+        let image: CGImage
     }
     private struct RequestID: Equatable {
-        let generation: UUID
+        let key: ThumbnailKey
         let revision: Int
     }
+    init(item: TimelineItem, session: ThumbnailSession) {
+        self.item = item
+        self.session = session
+        let key = ThumbnailSession.placeholderKey(for: item)
+        let initial = session.cachedImage(for: key).map {
+            Accepted(request: RequestID(key: key, revision: session.revision), key: key, image: $0)
+        }
+        _accepted = State(initialValue: initial)
+    }
     private var isVideo: Bool { item.mediaType == "video" }
-    private var request: RequestID { RequestID(generation: item.generation, revision: session.revision) }
+    private var request: RequestID {
+        RequestID(key: ThumbnailSession.placeholderKey(for: item), revision: session.revision)
+    }
     private var image: CGImage? {
-        guard let accepted, accepted.request == request else { return nil }
-        return session.cachedImage(for: accepted.key)
+        // revision restarts validation; it does not invalidate an already displayed image.
+        // Keep the source identity separate from the resolved key: the repository may
+        // resolve a newer generation than the currently loaded TimelineItem.
+        guard let accepted, accepted.request.key == request.key else { return nil }
+        return accepted.image
     }
     var body: some View {
         ZStack {
@@ -50,9 +65,13 @@ struct TimelineThumbnailCell: View {
                     accepted = nil
                     return
                 }
-                accepted = Accepted(request: requested, key: key)
+                if let image = session.cachedImage(for: key) {
+                    accepted = Accepted(request: requested, key: key, image: image)
+                } else if accepted?.key != key {
+                    accepted = nil
+                }
             } catch is CancellationError {
-                // 画面外へ出ても採用済みキーは残す。画像の保持／退避はNSCacheへ任せる。
+                // 再確認の中断では表示済み画像を消さない。保持はこのセルの生存期間だけ。
             } catch { if !Task.isCancelled { accepted = nil } }
         }
     }
