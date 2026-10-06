@@ -43,6 +43,12 @@ actor TimelineRepository {
     init(store: MediaRepository) { self.store = store }
     init(url: URL) throws { store = try MediaRepository(url: url) }
 
+    #if DEBUG
+    func originalDateValue(id: UUID, libraryID: UUID) async throws -> String? {
+        try await store.savedOriginalDateValue(id: id, libraryID: libraryID)
+    }
+    #endif
+
     @discardableResult
     func prepare(settings: SMBConnectionSettings,
                  progress: @Sendable (Int) async -> Void = { _ in }) async throws -> UUID {
@@ -269,3 +275,15 @@ nonisolated struct TimelineDiagnostics: Sendable {
         } else { withoutOffset += 1 }
     }
 }
+
+#if DEBUG
+extension MediaRepository {
+    func savedOriginalDateValue(id: UUID, libraryID: UUID) throws -> String? {
+        var fetch = FetchDescriptor<MediaEntry>(predicate: #Predicate {
+            $0.id == id && $0.libraryID == libraryID
+        })
+        fetch.fetchLimit = 1
+        return try context().fetch(fetch).first?.originalDateValue
+    }
+}
+#endif

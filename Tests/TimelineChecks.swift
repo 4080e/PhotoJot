@@ -5,6 +5,13 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
 
 @main struct TimelineChecks {
     static func main() async throws {
+        for (rawOffset, savedOffset, expected) in [("+0900", "+09:00", "+09:00"), ("+09:00", "+0900", "+09:00"), ("Z", "+0000", "+00:00"), ("-0530", "-05:30", "-05:30")] {
+            let parsed = TimelineDates.localCalendar("2022-04-30T17:14:00" + rawOffset, separateOffset: savedOffset, subsecond: nil)
+            check(parsed?.date == "2022-04-30T17:14:00" && parsed?.offset == expected, "compact/colon/Z normalization")
+        }
+        check(TimelineDates.localCalendar("2022-04-30T17:14:00+0900", separateOffset: "-0900", subsecond: nil) == nil, "conflicting offset rejected")
+        check(TimelineDates.localCalendar("2022-04-30T17:14:00+0960", separateOffset: nil, subsecond: nil) == nil, "invalid minutes rejected")
+        try await checkCompactOffsetRebuild()
         let url = URL(fileURLWithPath: CommandLine.arguments[1])
         let settings = SMBConnectionSettings(host: "nas", username: "user", share: "photos")
         let store = try MediaRepository(url: url)
@@ -74,7 +81,7 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
         check(Set([item("floating.jpg"), item("positive.heic"), item("negative.jpg")].compactMap { $0.date.groupKey }).count == 1, "offset/absent share calendar-day group")
         check(item("floating.jpg").date.recordedOffset == nil && item("positive.heic").date.recordedOffset == "+09:00" && item("negative.jpg").date.recordedOffset == "-05:00", "offset metadata retained")
         check(item("floating.jpg").date.groupKey != item("bulk/0.jpg").date.groupKey, "different days separate")
-        check(MetadataPolicy.version == 1 && TimelinePolicy.version == 1, "grouping needs no parser or key version change")
+        check(MetadataPolicy.version == 1 && TimelinePolicy.version == 2, "timeline-only version change")
         let testID = UUID()
         let early = TimelineDate(calendarDateTime: "2026-01-01T09:00:00", recordedOffset: "-05:00", kind: .internalMetadata, source: nil, quality: nil)
         let late = TimelineDate(calendarDateTime: "2026-01-01T10:00:00", recordedOffset: "+09:00", kind: .internalMetadata, source: nil, quality: nil)
@@ -139,4 +146,35 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
         catch TimelineError.changedDuringRead { }
         print("Timeline checks passed: Stage3 migration, preserved metadata, calendar-day groups, UTC fallback, kinds, timezone independence, keyset pages, unknown tail, stable IDs, generation, save integration, missing and stale cursor")
     }
+}
+
+private func checkCompactOffsetRebuild() async throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".store")
+    let schema = Schema([Library.self, MediaEntry.self, ScanRun.self])
+    let container = try ModelContainer(for: schema, configurations: [ModelConfiguration("PhotoJotIndex", schema: schema, url: url, cloudKitDatabase: .none)])
+    let context = ModelContext(container)
+    let settings = SMBConnectionSettings(host: "offline", username: "user", share: "photos")
+    let scope = [settings.host, String(settings.port), settings.domain, settings.username, settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")
+    let library = Library(scopeKey: scope, connectionData: try JSONEncoder().encode(settings), displayName: "test")
+    context.insert(library)
+    let run = ScanRun(libraryID: library.id, sequence: 1); context.insert(run)
+    library.completedScanSequence = 1; library.timelinePreparedVersion = 1
+    let entry = MediaEntry(libraryID: library.id, run: run, file: ScannedMedia(path: "sample.mov", size: 123, creation: Date(), modified: Date()))
+    context.insert(entry)
+    entry.originalDateValue = "2022-04-30T17:14:00+0900"; entry.utcOffset = "+0900"
+    entry.dateSource = "quickTimeCreationDate"; entry.dateQuality = "captureMetadata"
+    entry.metadataState = "complete"; entry.metadataGeneration = entry.generation
+    entry.metadataVersion = MetadataPolicy.version; entry.metadataCompletedAt = Date()
+    entry.timelineKeyVersion = 1; entry.timelineSortKey = "0!" + entry.id.uuidString
+    let completed = entry.metadataCompletedAt, generation = entry.generation
+    try context.save()
+    let repository = try TimelineRepository(url: url)
+    let id = try await repository.prepare(settings: settings)
+    let page = try await repository.page(libraryID: id)
+    check(page.items.count == 1, "rebuilt item present")
+    check(page.items[0].date.calendarDateTime == "2022-04-30T17:14:00" && page.items[0].date.recordedOffset == "+09:00", "real sample repaired locally")
+    check(page.items[0].sortKey.hasPrefix("12022-04-30T17:14:00!"), "unknown sort key rebuilt")
+    let fresh = try ModelContext(container).fetch(FetchDescriptor<MediaEntry>()).first!
+    check(fresh.timelineKeyVersion == 2 && fresh.originalDateValue == entry.originalDateValue && fresh.utcOffset == "+0900", "only derived fields normalized")
+    check(fresh.metadataCompletedAt == completed && fresh.generation == generation && fresh.metadataGeneration == generation && fresh.metadataVersion == 1 && fresh.metadataState == "complete", "metadata untouched")
 }

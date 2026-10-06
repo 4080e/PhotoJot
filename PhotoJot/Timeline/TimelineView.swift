@@ -127,7 +127,7 @@ struct TimelineView: View {
             }
         }
         #if DEBUG
-        .sheet(item: $selectedItem) { item in DeveloperMediaDetailsView(item: item) }
+        .sheet(item: $selectedItem) { item in DeveloperMediaDetailsView(item: item, repository: repository) }
         #endif
     }
 

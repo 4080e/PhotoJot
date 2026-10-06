@@ -81,12 +81,15 @@ struct DeveloperToolsView: View {
 struct DeveloperMediaDetailsView: View {
     @Environment(\.dismiss) private var dismiss
     let item: TimelineItem
+    let repository: TimelineRepository
+    @State private var originalDateValue = "なし"
     var body: some View {
         NavigationStack {
             Form {
                 LabeledContent("ファイル", value: (item.relativePath as NSString).lastPathComponent)
                 LabeledContent("種類", value: item.mediaType == "video" ? "動画" : "写真")
                 LabeledContent("暦日時", value: item.date.calendarDateTime ?? "日時不明")
+                LabeledContent("日時原文", value: originalDateValue)
                 LabeledContent("記録offset", value: item.date.recordedOffset ?? "なし")
                 LabeledContent("分類", value: item.date.kind.rawValue)
                 LabeledContent("source", value: item.date.source ?? "なし")
@@ -94,6 +97,10 @@ struct DeveloperMediaDetailsView: View {
                 LabeledContent("metadata状態", value: item.metadataState ?? "未処理")
                 LabeledContent("現generationの解析完了", value: item.metadataIsCurrent ? "はい" : "いいえ")
                 Section("共有からの相対パス") { Text(item.relativePath) }
+            }
+            .task(id: item.id) {
+                do { originalDateValue = try await repository.originalDateValue(id: item.id, libraryID: item.libraryID) ?? "なし" }
+                catch { originalDateValue = "取得できません" }
             }
             .navigationTitle("開発用情報")
             .navigationBarTitleDisplayMode(.inline)

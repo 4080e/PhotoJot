@@ -2,7 +2,7 @@ import Foundation
 
 nonisolated enum TimelinePolicy {
     // metadata parserとは独立。保存済みの値からローカルで再構築できる。
-    static let version = 1
+    static let version = 2
     static let pageSize = 200
     static let buildBatchSize = 500
 }
@@ -41,7 +41,7 @@ nonisolated struct TimelineDate: Sendable, Equatable {
 
 nonisolated enum TimelineDates {
     private static let localExpression = try? NSRegularExpression(pattern:
-        #"^([0-9]{4})[-:]([0-9]{2})[-:]([0-9]{2})[T ]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,256}))?(Z|[+-][0-9]{2}:[0-9]{2})?$"#)
+        #"^([0-9]{4})[-:]([0-9]{2})[-:]([0-9]{2})[T ]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,256}))?(Z|[+-][0-9]{2}:?[0-9]{2})?$"#)
     static func hasCurrentMetadata(_ entry: MediaEntry) -> Bool {
         entry.metadataCompletedAt != nil && entry.metadataGeneration == entry.generation
             && entry.metadataVersion == MetadataPolicy.version
@@ -104,11 +104,11 @@ nonisolated enum TimelineDates {
     private static func offset(_ value: String?) -> String? {
         guard let value else { return nil }
         if value == "Z" { return "+00:00" }
-        guard value.range(of: #"^[+-][0-9]{2}:[0-9]{2}$"#, options: .regularExpression) != nil,
+        guard value.range(of: #"^[+-][0-9]{2}:?[0-9]{2}$"#, options: .regularExpression) != nil,
               let hours = Int(value.dropFirst().prefix(2)), hours <= 23,
               let minutes = Int(value.suffix(2)), minutes <= 59 else { return nil }
         // -00:00も元表現を維持する。timezone名や撮影地を推定しない。
-        return value
+        return String(value.prefix(3)) + ":" + value.suffix(2)
     }
 
     static func localCalendar(_ raw: String, separateOffset: String?, subsecond: String?) -> (date: String, offset: String?)? {
