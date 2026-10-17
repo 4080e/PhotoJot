@@ -57,7 +57,7 @@ struct TimelineThumbnailCell: View {
         let layout = UICollectionViewFlowLayout()
         layout.minimumInteritemSpacing = 8; layout.minimumLineSpacing = 8
         layout.sectionInset = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
-        let view = UICollectionView(frame: root.view.bounds, collectionViewLayout: layout)
+        let view = TimelineCollectionView(frame: root.view.bounds, collectionViewLayout: layout)
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.delegate = coordinator
         coordinator.install(view)
@@ -65,7 +65,81 @@ struct TimelineThumbnailCell: View {
         root.view.layoutIfNeeded()
         coordinator.update(initial, in: view)
         view.layoutIfNeeded()
+        // 実際のFlowLayout属性を検査し、計算式だけをテストして済ませない。
+        let originalFrame = view.frame
+        view.autoresizingMask = []
+        view.contentInsetAdjustmentBehavior = .never
+        func verifyGrid(_ label: String) {
+            view.layoutIfNeeded()
+            let inset = view.adjustedContentInset
+            let available = view.bounds.width - inset.left - inset.right - layout.sectionInset.left - layout.sectionInset.right
+            let spacing = layout.minimumInteritemSpacing
+            let columns = Int(floor((available + spacing) / (88 + spacing)))
+            let side = floor((available - CGFloat(columns - 1) * spacing) / CGFloat(columns))
+            let frames = (0..<32).map { view.layoutAttributesForItem(at: IndexPath(item: $0, section: 0))!.frame }
+            let firstRow = frames.filter { abs($0.minY - frames[0].minY) < 0.5 }
+            precondition(firstRow.count == columns, "\(label): expected \(columns) columns, got \(firstRow.count)")
+            for (index, frame) in frames.enumerated() {
+                precondition(abs(frame.width - side) < 0.5 && abs(frame.height - side) < 0.5, "\(label): stale cell size \(frame), expected \(side)")
+                precondition(frame.minX >= inset.left + layout.sectionInset.left - 0.5 && frame.maxX <= view.bounds.width - inset.right - layout.sectionInset.right + 0.5, "\(label): cell outside horizontal margins")
+                for other in frames.dropFirst(index + 1) {
+                    precondition(!frame.intersects(other), "\(label): overlapping cells")
+                }
+            }
+            // floorによる端数以外の空白が行末やセル間に残っていないこと。
+            precondition(abs(firstRow[0].minX - inset.left - layout.sectionInset.left) < 1, "\(label): leading gap")
+            precondition(view.bounds.width - inset.right - layout.sectionInset.right - firstRow.last!.maxX < CGFloat(columns) + 1, "\(label): trailing gap")
+            for pair in zip(firstRow, firstRow.dropFirst()) {
+                let gap = pair.1.minX - pair.0.maxX
+                precondition(gap >= spacing - 0.5 && gap < spacing + 2, "\(label): unexpected gap \(gap)")
+            }
+            let offset = view.contentOffset
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+            precondition(view.contentOffset == offset, "\(label): unchanged layout moved scroll position")
+            print("PASS: grid \(label), \(columns) columns, side=\(side)")
+        }
+        view.frame = CGRect(x: 0, y: 0, width: 430, height: 800)
+        verifyGrid("initial portrait")
+        for cycle in 1...3 {
+            view.frame.size = CGSize(width: 932, height: 350)
+            verifyGrid("landscape before inset \(cycle)")
+            view.contentInset = UIEdgeInsets(top: 0, left: 62, bottom: 0, right: 62)
+            verifyGrid("landscape with inset \(cycle)")
+            // 幅とinsetが別々のlayoutで更新される回転を再現。
+            view.frame.size = CGSize(width: 430, height: 800)
+            verifyGrid("portrait before inset settles \(cycle)")
+            view.contentInset = .zero
+            verifyGrid("returned portrait \(cycle)")
+        }
+        view.contentInsetAdjustmentBehavior = .always
+        root.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 30, bottom: 0, right: 20)
+        root.view.layoutIfNeeded()
+        verifyGrid("safe area changes without width change")
+        root.additionalSafeAreaInsets = .zero
+        root.view.layoutIfNeeded()
+        verifyGrid("safe area restored")
+        layout.sectionInset = UIEdgeInsets(top: 0, left: 24, bottom: 0, right: 24)
+        layout.minimumInteritemSpacing = 12
+        layout.minimumLineSpacing = 12
+        view.setNeedsLayout()
+        verifyGrid("section margins and spacing changed")
+        layout.sectionInset = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
+        layout.minimumInteritemSpacing = 8
+        layout.minimumLineSpacing = 8
+        view.contentInsetAdjustmentBehavior = .automatic
+        view.frame = originalFrame
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
         view.setContentOffset(CGPoint(x: 0, y: 505), animated: false)
+        let offsetBeforeRotation = view.contentOffset.y
+        view.frame.size.width = 932
+        view.layoutIfNeeded()
+        view.frame = originalFrame
+        view.layoutIfNeeded()
+        precondition(abs(view.contentOffset.y - offsetBeforeRotation) < 1, "rotation reset scroll offset")
+        precondition(coordinator.dataSource.snapshot().itemIdentifiers == original.map(\.id), "rotation changed snapshot")
         let anchor = coordinator.anchor(in: view)!
         func verify(_ anchor: TimelineViewportAnchor, _ label: String) {
             view.layoutIfNeeded()

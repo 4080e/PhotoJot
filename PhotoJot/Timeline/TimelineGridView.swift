@@ -27,7 +27,7 @@ struct TimelineGridView: UIViewRepresentable {
         layout.minimumInteritemSpacing = 8
         layout.minimumLineSpacing = 8
         layout.sectionInset = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
-        let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        let view = TimelineCollectionView(frame: .zero, collectionViewLayout: layout)
         view.backgroundColor = .clear
         view.alwaysBounceVertical = true
         view.delegate = context.coordinator
@@ -204,9 +204,12 @@ struct TimelineGridView: UIViewRepresentable {
         #endif
 
         func collectionView(_ view: UICollectionView, layout: UICollectionViewLayout, sizeForItemAt path: IndexPath) -> CGSize {
-            let available = max(1, view.bounds.width - view.adjustedContentInset.left - view.adjustedContentInset.right - 32)
-            let columns = max(1, floor((available + 8) / 96))
-            let side = floor((available - (columns - 1) * 8) / columns)
+            guard let flow = layout as? UICollectionViewFlowLayout else { return .zero }
+            let spacing = flow.minimumInteritemSpacing
+            let available = max(1, view.bounds.width - view.adjustedContentInset.left - view.adjustedContentInset.right
+                                - flow.sectionInset.left - flow.sectionInset.right)
+            let columns = max(1, floor((available + spacing) / (88 + spacing)))
+            let side = floor((available - (columns - 1) * spacing) / columns)
             return CGSize(width: side, height: side)
         }
         func collectionView(_ view: UICollectionView, layout: UICollectionViewLayout, referenceSizeForHeaderInSection section: Int) -> CGSize {
@@ -215,6 +218,41 @@ struct TimelineGridView: UIViewRepresentable {
         func collectionView(_ view: UICollectionView, layout: UICollectionViewLayout, referenceSizeForFooterInSection section: Int) -> CGSize {
             CGSize(width: view.bounds.width, height: section == parent.sections.count - 1 ? parent.footerHeight : 0)
         }
+    }
+}
+
+// bounds変更の通知時点では古い幅／insetが使われることがあるため、実際のlayout時に確認する。
+final class TimelineCollectionView: UICollectionView {
+    private struct Metrics: Equatable {
+        let width: CGFloat
+        let leftInset: CGFloat
+        let rightInset: CGFloat
+        let sectionInset: UIEdgeInsets
+        let interitemSpacing: CGFloat
+        let lineSpacing: CGFloat
+    }
+    private var lastMetrics: Metrics?
+
+    override func layoutSubviews() {
+        invalidateMetricsIfNeeded()
+        super.layoutSubviews()
+        // super内でsafe area由来のadjustedContentInsetが更新された場合も最新値へ収束させる。
+        if invalidateMetricsIfNeeded() { super.layoutSubviews() }
+    }
+
+    @discardableResult
+    private func invalidateMetricsIfNeeded() -> Bool {
+        guard let flow = collectionViewLayout as? UICollectionViewFlowLayout else { return false }
+        let metrics = Metrics(width: bounds.width, leftInset: adjustedContentInset.left,
+                              rightInset: adjustedContentInset.right, sectionInset: flow.sectionInset,
+                              interitemSpacing: flow.minimumInteritemSpacing, lineSpacing: flow.minimumLineSpacing)
+        guard metrics != lastMetrics else { return false }
+        lastMetrics = metrics
+        let context = UICollectionViewFlowLayoutInvalidationContext()
+        context.invalidateFlowLayoutDelegateMetrics = true
+        context.invalidateFlowLayoutAttributes = true
+        flow.invalidateLayout(with: context)
+        return true
     }
 }
 
