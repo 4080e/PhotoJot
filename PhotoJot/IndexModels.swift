@@ -38,6 +38,8 @@ import SwiftData
     var fileSize: Int64
     var smbCreationTime: Date
     var smbLastWriteTime: Date
+    // ユーザー指定の表示回転。nilは0°。原本・metadata更新から独立する。
+    var rotationQuarterTurns: Int?
     var generation: UUID
     var lastSeenScanID: UUID
     var lastSeenSequence: Int64

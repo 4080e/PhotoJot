@@ -15,6 +15,10 @@ private func check(_ value: @autoclosure () throws -> Bool) throws { let result 
         try check(migrated.count == 1 && migrated[0].id.uuidString == oldID && migrated[0].relativePath == "old.jpg")
         try check(migrated[0].metadataCompletedAt == nil && migrated[0].metadataState == nil)
 
+        let migratedRotation = try await repository.rotationQuarterTurns(id: migrated[0].id, libraryID: migrated[0].libraryID)
+        try check(migratedRotation == 0)
+        print("PASS: migrated existing media defaults to zero rotation")
+
         let settings = SMBConnectionSettings(host: "nas", username: "user", share: "photos")
         func file(_ name: String, _ size: Int64 = 100) -> ScannedMedia {
             ScannedMedia(path: name, size: size, creation: Date(timeIntervalSince1970: 1000), modified: Date(timeIntervalSince1970: 2000))

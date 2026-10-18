@@ -79,10 +79,26 @@ actor ViewerReadProbe {
         let thumbnails = ThumbnailSession(cache: cache, resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
             generate: { _ in preconditionFailure("preview must never generate or access NAS") }, disconnect: {})
         let photoProbe = ViewerReadProbe(jpeg)
-        let model = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in photoProbe.stream })
+        let model = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
+            loadRotation: { try await repo.rotationQuarterTurns(id: $0, libraryID: $1) },
+            saveRotation: { try await repo.saveRotationQuarterTurns($0, id: $1, libraryID: $2) }, open: { _ in photoProbe.stream })
         model.start(item: photo, viewport: viewport)
         await wait { !model.isLoading }
         check(model.image != nil && model.message == nil)
+        model.rotatePhotoRight()
+        model.rotatePhotoRight()
+        model.rotatePhotoRight()
+        await model.stop()
+        model.start(item: photo, viewport: viewport)
+        await wait { !model.isLoading }
+        check(model.photo.zoom.quarterTurns == 3)
+        model.rotatePhotoRight()
+        await model.stop()
+        model.start(item: photo, viewport: viewport)
+        await wait { !model.isLoading }
+        check(model.photo.zoom.quarterTurns == 0 && model.rotationError == nil)
+        print("PASS: queued rotation saves, immediate close/reopen restoration, 360-degree reset")
+
         model.preparePreview(for: photo, thumbnails: thumbnails)
         await wait { model.previewImage != nil }
         let preview = model.previewImage
@@ -92,7 +108,7 @@ actor ViewerReadProbe {
         model.scenePhaseChanged(.active)
         await wait { !model.isLoading }
         check(model.image != nil && model.previewImage === preview)
-        check(await photoProbe.closes == 2)
+        check(await photoProbe.closes == 4)
         let originalReads = await photoProbe.reads
         model.photo.zoom.scale = 2
         model.photo.request(scale: 2)
@@ -100,7 +116,7 @@ actor ViewerReadProbe {
         check(model.image!.height == 600)
         check(await photoProbe.reads == originalReads) // refinement is local-only
         await model.stop(); check(model.image == nil && model.photo.zoom.scale == 1 && model.previewImage == nil)
-        check(await photoProbe.closes == 2)
+        check(await photoProbe.closes == 4)
         // 写真取得中に閉じてもreaderを早期解放せず、遅れて返った画像を表示しない。
         let photoClosingProbe = ViewerReadProbe(jpeg, hold: true)
         let photoClosing = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { _ in photoClosingProbe.stream })

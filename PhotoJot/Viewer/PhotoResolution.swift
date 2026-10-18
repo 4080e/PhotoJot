@@ -17,6 +17,10 @@ import Observation
         reset()
         quarterTurns = next
     }
+    func restoreRotation(_ value: Int) {
+        reset()
+        quarterTurns = ((value % 4) + 4) % 4
+    }
     func reset() { epoch = UUID(); scale = 1; offset = .zero; pinching = false; quarterTurns = 0 }
 }
 

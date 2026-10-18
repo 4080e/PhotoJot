@@ -20,6 +20,24 @@ actor MediaRepository {
         return context
     }
 
+    func rotationQuarterTurns(id: UUID, libraryID: UUID) throws -> Int {
+        let context = context()
+        guard let entry = try context.fetch(FetchDescriptor<MediaEntry>(predicate: #Predicate {
+            $0.id == id && $0.libraryID == libraryID
+        })).first else { throw IndexFailure.invalidState }
+        return ((entry.rotationQuarterTurns ?? 0) % 4 + 4) % 4
+    }
+
+    func saveRotationQuarterTurns(_ value: Int, id: UUID, libraryID: UUID) throws {
+        guard (0..<4).contains(value) else { throw IndexFailure.invalidState }
+        let context = context()
+        guard let entry = try context.fetch(FetchDescriptor<MediaEntry>(predicate: #Predicate {
+            $0.id == id && $0.libraryID == libraryID
+        })).first else { throw IndexFailure.invalidState }
+        entry.rotationQuarterTurns = value
+        try context.save()
+    }
+
     private func library(settings: SMBConnectionSettings, in context: ModelContext) throws -> Library? {
         let scope = [settings.host, String(settings.port), settings.domain, settings.username,
                      settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")

@@ -34,6 +34,10 @@ private func check(_ condition: @autoclosure () throws -> Bool) throws {
         let original = baseline.first { $0.pathKey == initial[0].pathKey }!
         let originalID = original.id, originalGeneration = original.generation
 
+        let initialRotation = try await repository.rotationQuarterTurns(id: originalID, libraryID: first.libraryID)
+        try check(initialRotation == 0)
+        try await repository.saveRotationQuarterTurns(3, id: originalID, libraryID: first.libraryID)
+
         let second = try await repository.begin(settings: settings)
         try await repository.ingest([initial[0], initial[1]], ticket: second, progress: ScanProgress())
         _ = try await repository.finish(second, progress: ScanProgress(), completed: false)
@@ -49,6 +53,8 @@ private func check(_ condition: @autoclosure () throws -> Bool) throws {
         try check(after.count == 5 && after.filter { $0.isMissing(completedScanSequence: completed) }.count == 3)
         let changed = after.first { $0.pathKey == initial[0].pathKey }!
         try check(changed.id == originalID && changed.generation != originalGeneration)
+        let retainedRotation = try await repository.rotationQuarterTurns(id: originalID, libraryID: first.libraryID)
+        try check(retainedRotation == 3)
         let unchanged = after.first { $0.pathKey == initial[1].pathKey }!
         try check(unchanged.generation == baseline.first { $0.pathKey == initial[1].pathKey }!.generation)
 
@@ -131,6 +137,14 @@ private func check(_ condition: @autoclosure () throws -> Bool) throws {
         try check(try runs().first { $0.id == partial.runID }!.state == "cancelled")
         let abandoned = try await repository.begin(settings: settings)
         let reopened = try MediaRepository(url: url)
+        let reopenedRotation = try await reopened.rotationQuarterTurns(id: originalID, libraryID: first.libraryID)
+        try check(reopenedRotation == 3)
+        for turn in [0, 1, 2, 3, 0] {
+            try await reopened.saveRotationQuarterTurns(turn, id: originalID, libraryID: first.libraryID)
+            let stored = try await repository.rotationQuarterTurns(id: originalID, libraryID: first.libraryID)
+            try check(stored == turn)
+        }
+        print("PASS: default rotation, persistence across repository reopen and library updates including generation change, four angles")
         let recovery = try await reopened.begin(settings: settings)
         try check(try runs().first { $0.id == abandoned.runID }!.state == "interrupted")
         _ = try await reopened.finish(recovery, progress: .init(), completed: false)

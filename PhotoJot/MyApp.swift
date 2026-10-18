@@ -80,7 +80,8 @@ import SwiftUI
         }, disconnect: { await access.disconnectWhenAvailable() })
         let viewer = MediaViewerController(resolve: { id, libraryID in
             try await repository.thumbnailTarget(id: id, libraryID: libraryID)
-        }, open: { target in
+        }, loadRotation: { try await repository.rotationQuarterTurns(id: $0, libraryID: $1) },
+           saveRotation: { try await repository.saveRotationQuarterTurns($0, id: $1, libraryID: $2) }, open: { target in
             guard let password = try credentials.password(account: target.settings.credentialAccount) else { throw ScanFailure.noPassword }
             let handle = try await access.openViewer(target: target, password: password)
             return MediaViewerStream(read: { try await access.readViewer(handle, offset: $0, count: $1) },

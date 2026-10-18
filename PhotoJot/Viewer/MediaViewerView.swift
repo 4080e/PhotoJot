@@ -59,7 +59,7 @@ struct MediaViewerView: View {
                         .labelStyle(.iconOnly)
                         .disabled(model.isClosing || closing || dismissProgress > 0)
                     if session.currentItem.mediaType == "photo" {
-                        Button("右に90°回転", systemImage: "rotate.right") { model.photo.zoom.rotateRight() }
+                        Button("右に90°回転", systemImage: "rotate.right") { model.rotatePhotoRight() }
                             .labelStyle(.iconOnly)
                             .disabled(model.image == nil || model.showsLoading || model.isClosing || closing ||
                                       model.activeItem?.id != session.currentItem.id ||
@@ -78,6 +78,14 @@ struct MediaViewerView: View {
             ViewerInformationSheet(calendarDateTime: session.currentItem.date.calendarDateTime,
                                    relativePath: session.currentItem.relativePath)
                 .interactiveDismissDisabled(false)
+        }
+        .alert("回転角度の保存", isPresented: Binding(
+            get: { model.rotationError != nil },
+            set: { if !$0 { model.rotationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { model.rotationError = nil }
+        } message: {
+            Text(model.rotationError ?? "")
         }
         .task { session.begin() }
         .onDisappear {

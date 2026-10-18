@@ -23,6 +23,10 @@ import Observation
     @ObservationIgnored private var observation: NSKeyValueObservation?
     @ObservationIgnored private var presentation: (item: TimelineItem, viewport: FullPhotoViewport)?
     @ObservationIgnored private var pendingSelection: (item: TimelineItem, viewport: FullPhotoViewport)?
+    var rotationError: String?
+    @ObservationIgnored private let loadRotation: @Sendable (UUID, UUID) async throws -> Int
+    @ObservationIgnored private let saveRotation: @Sendable (Int, UUID, UUID) async throws -> Void
+    @ObservationIgnored private var rotationSave: Task<Void, Never>?
     private var resumeAfterBackground = false
     // 復帰予約中は中断メッセージではなく、通常の読み込み表示を使う。
     var showsLoading: Bool { resumeAfterBackground || isLoading || pendingSelection != nil }
@@ -31,8 +35,24 @@ import Observation
     private var editing = false
 
     init(resolve: @escaping @Sendable (UUID, UUID) async throws -> MediaThumbnailTarget?,
+         loadRotation: @escaping @Sendable (UUID, UUID) async throws -> Int = { _, _ in 0 },
+         saveRotation: @escaping @Sendable (Int, UUID, UUID) async throws -> Void = { _, _, _ in },
          open: @escaping (MediaThumbnailTarget) async throws -> MediaViewerStream) {
         self.resolve = resolve; self.open = open
+        self.loadRotation = loadRotation; self.saveRotation = saveRotation
+    }
+
+    func rotatePhotoRight() {
+        guard let item = activeItem, item.mediaType == "photo",
+              image != nil, !showsLoading, !isClosing else { return }
+        photo.zoom.rotateRight()
+        let value = photo.zoom.quarterTurns
+        let previous = rotationSave
+        rotationSave = Task {
+            await previous?.value
+            do { try await saveRotation(value, item.id, item.libraryID) }
+            catch { rotationError = "回転角度を保存できませんでした。もう一度お試しください。" }
+        }
     }
 
     // ページ確定時だけ呼ぶ。旧処理の終了中は最新の要求1件へ集約する。
@@ -85,6 +105,8 @@ import Observation
                     installPlayer(resource.asset)
 
                 } else {
+                    let rotation = try await loadRotation(item.id, item.libraryID)
+                    try Task.checkCancellation()
                     let load = Task.detached { try await PhotoViewerImage.load(size: UInt64(target.fileSize), viewport: viewport, read: read) }
                     let decoded = try await withTaskCancellationHandler { try await load.value } onCancel: { load.cancel() }
                     try Task.checkCancellation()
@@ -94,6 +116,7 @@ import Observation
                     guard try await resolve(item.id, item.libraryID)?.key == target.key else { throw ViewerFailure.changed }
                     try Task.checkCancellation()
                     photo.install(decoded, isCurrent: { try await resolve(item.id, item.libraryID)?.key == target.key })
+                    photo.zoom.restoreRotation(rotation)
                 }
                 isLoading = false
             } catch {
@@ -172,6 +195,8 @@ import Observation
         player?.pause(); player?.replaceCurrentItem(with: nil)
         let task = Task {
             await work?.value
+            await rotationSave?.value
+            rotationSave = nil
             await releaseResources()
             work = nil; isLoading = false
             self.message = message
