@@ -161,6 +161,12 @@ struct TimelineScrollRequest: Equatable {
         } while emptyReloadRequested && blocks.isEmpty && !Task.isCancelled
     }
 
+    func reloadAfterUpdate() async {
+        while isLoading { await withCheckedContinuation { idleWaiters.append($0) } }
+        guard !Task.isCancelled else { return }
+        await jump(to: nil)
+    }
+
     func reloadIfEmpty() async {
         guard blocks.isEmpty else { return }
         if isLoading { emptyReloadRequested = true; return }

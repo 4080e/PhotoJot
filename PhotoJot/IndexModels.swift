@@ -9,6 +9,7 @@ import SwiftData
     var connectionData: Data
     var displayName: String
     var createdAt: Date
+    var lastSuccessfulUpdateAt: Date?
     var updatedAt: Date
     var nextScanSequence: Int64
     var completedScanSequence: Int64

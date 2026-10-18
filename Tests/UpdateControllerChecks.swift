@@ -10,6 +10,7 @@ import SwiftUI
     var scanSnapshots: [String] = []
     var metadataSnapshots: [String] = []
     var password = "first"
+    var successes = 0
     enum Failure: Error { case expected }
 
     func controller() -> LibraryUpdateController {
@@ -33,7 +34,7 @@ import SwiftUI
             self.events.append("metadata-end")
             try Task.checkCancellation()
             if self.failMetadata { throw Failure.expected }
-        })
+        }, saveSuccess: { _ in self.successes += 1 })
     }
     func releaseScan() { let gate = scanGate; scanGate = nil; gate?.resume() }
     func releaseMetadata() { let gate = metadataGate; metadataGate = nil; gate?.resume() }
@@ -115,49 +116,60 @@ import SwiftUI
         let lifecycleWork = Work(), lifecycle: LibraryUpdateController
         lifecycle = lifecycleWork.controller()
         lifecycle.scenePhaseChanged(.active)
-        lifecycle.scenePhaseChanged(.active)
+        await wait { !lifecycle.isRunning }
+        precondition(lifecycleWork.scanSnapshots.isEmpty)
+        lifecycle.requestUpdate()
         await wait { lifecycleWork.scanGate != nil }
-        precondition(lifecycleWork.scanSnapshots.count == 1)
         lifecycle.scenePhaseChanged(.inactive)
-        precondition(lifecycle.state == .running) // inactiveだけでは止めない。
+        precondition(lifecycle.state == .running)
         lifecycle.scenePhaseChanged(.background)
-        lifecycle.scenePhaseChanged(.background)
-        precondition(lifecycle.state == .cancelling && lifecycle.isRunning)
-        lifecycle.requestUpdate() // background中に更新を開始・予約しない。
+        lifecycle.scenePhaseChanged(.active)
         precondition(!lifecycle.restartRequested)
-        lifecycle.scenePhaseChanged(.active)
-        lifecycle.scenePhaseChanged(.active)
-        precondition(lifecycle.restartRequested && lifecycleWork.scanSnapshots.count == 1)
         lifecycleWork.releaseScan()
-        await wait { lifecycleWork.scanGate != nil }
-        precondition(lifecycleWork.scanSnapshots.count == 2 && lifecycleWork.metadataSnapshots.isEmpty)
-        lifecycleWork.releaseScan()
-        await wait { lifecycleWork.metadataGate != nil }
-        lifecycle.scenePhaseChanged(.background)
-        lifecycleWork.releaseMetadata()
         await wait { !lifecycle.isRunning }
-        precondition(lifecycle.state == .cancelled && lifecycleWork.scanSnapshots.count == 2)
+        lifecycle.scenePhaseChanged(.inactive)
         lifecycle.scenePhaseChanged(.active)
-        await wait { lifecycleWork.scanGate != nil }
-        precondition(lifecycleWork.scanSnapshots.count == 3)
-        lifecycleWork.releaseScan()
-        await wait { lifecycleWork.metadataGate != nil }
-        lifecycleWork.releaseMetadata()
-        await wait { !lifecycle.isRunning }
-        lifecycle.scenePhaseChanged(.active) // 完了後も重複通知で再実行しない。
-        precondition(lifecycle.state == .completed && lifecycleWork.scanSnapshots.count == 3)
+        precondition(lifecycle.state == .cancelled && lifecycleWork.scanSnapshots.count == 1)
+        precondition(work.successes == 1 && lifecycleWork.successes == 0)
 
-        lifecycle.scenePhaseChanged(.inactive)
-        lifecycle.scenePhaseChanged(.active)
-        await wait { lifecycleWork.scanGate != nil }
-        lifecycle.scenePhaseChanged(.background)
-        lifecycle.scenePhaseChanged(.active)
-        precondition(lifecycle.restartRequested)
-        lifecycle.scenePhaseChanged(.background) // 再開待ち中に再度background。
-        precondition(!lifecycle.restartRequested)
-        lifecycleWork.releaseScan()
-        await wait { !lifecycle.isRunning }
-        precondition(lifecycle.state == .cancelled && lifecycleWork.scanSnapshots.count == 4)
+        let repository = try MediaRepository(url: URL(fileURLWithPath: CommandLine.arguments[1]))
+        let settings = SMBConnectionSettings(host: "nas", share: "initial")
+        var initialScans = 0
+        func initialController() -> LibraryUpdateController {
+            LibraryUpdateController(connection: { .init(settings: settings, password: "") },
+                scan: { _, _ in initialScans += 1; throw Work.Failure.expected },
+                metadata: { _, _ in fatalError("metadata after failed initial scan") },
+                prepareInitialUpdate: { try await repository.prepareInitialUpdate(settings: settings) })
+        }
+        let initial = initialController()
+        initial.scenePhaseChanged(.active)
+        await wait { !initial.isRunning }
+        precondition(initial.state == .failed && initialScans == 1)
+        let relaunched = initialController()
+        relaunched.scenePhaseChanged(.active)
+        await wait { !relaunched.isRunning }
+        precondition(relaunched.state == .idle && initialScans == 1)
+        let interruptedSettings = SMBConnectionSettings(host: "nas", share: "interrupted")
+        let interrupted = LibraryUpdateController(connection: { .init(settings: interruptedSettings, password: "") },
+            scan: { _, _ in fatalError("cancelled initial scan") }, metadata: { _, _ in },
+            prepareInitialUpdate: { try await repository.prepareInitialUpdate(settings: interruptedSettings) })
+        interrupted.scenePhaseChanged(.active)
+        interrupted.scenePhaseChanged(.background)
+        await wait { !interrupted.isRunning }
+        let shouldRetry = try await repository.prepareInitialUpdate(settings: interruptedSettings)
+        precondition(!shouldRetry && interrupted.state == .cancelled)
+        let before = try await repository.lastSuccessfulUpdate(settings: settings)
+        precondition(before == nil)
+        try await repository.saveSuccessfulUpdate(settings: settings)
+        let completedDate = try await repository.lastSuccessfulUpdate(settings: settings)
+        precondition(completedDate != nil)
+        let run = try await repository.begin(settings: settings)
+        _ = try await repository.finish(run, progress: .init(), completed: false)
+        let after = try await repository.lastSuccessfulUpdate(settings: settings)
+        precondition(after == completedDate)
+        let other = SMBConnectionSettings(host: "nas", share: "other")
+        let otherDate = try await repository.lastSuccessfulUpdate(settings: other)
+        precondition(otherDate == nil)
 
         // yield前からの中断要求を、次の処理へ通さない。
         let checkpoint = Task {
@@ -167,7 +179,7 @@ import SwiftUI
         }
         try await checkpoint.value
         try await UpdateCheckpoint.yield()
-        print("PASS: lifecycle active/inactive/background, duplicate active, drain/restart, re-background, checkpoints")
+        print("PASS: manual lifecycle, initial failure/cancellation persistence, per-library success date, checkpoints")
         print("PASS: serial update, duplicate suppression, snapshots, progress, cancellation drain, coalesced restart, restart cancellation, errors")
     }
 }

@@ -103,7 +103,7 @@ import Foundation
         changing.draft.share = "failed"
         let rejected = await changing.save()
         precondition(!rejected && changing.savedSettings?.share == "other" && changing.draft.share == "failed")
-        // sheetの表示だけでは実行中の更新を止めない。backgroundで止め、activeは閉じるまで保留。
+        // 設定画面の開閉・active復帰だけでは更新しない。
         fixture.failCheck = false
         precondition(changing.beginEditing())
         precondition(!changing.beginEditing()) // 同じdraftの同時編集は開始しない。
@@ -116,7 +116,7 @@ import Foundation
         changing.endEditing()
         await wait { !fixture.update.isRunning }
         precondition(changing.savedSettings?.share == "other")
-        precondition(fixture.events.suffix(3) == ["update", "scan:other", "metadata"])
+        precondition(fixture.events.count == beforeEditing)
 
         fixture.pauseScan = true
         fixture.update.requestUpdate()
@@ -127,12 +127,12 @@ import Foundation
         fixture.update.scenePhaseChanged(.active)
         precondition(fixture.update.state == .cancelling && !fixture.update.restartRequested)
         let duringDrain = fixture.events.count
-        changing.endEditing() // 中断終了前に閉じる場合は既存のrestart予約を使用。
-        precondition(fixture.update.restartRequested && fixture.events.count == duringDrain)
+        changing.endEditing()
+        precondition(!fixture.update.restartRequested && fixture.events.count == duringDrain)
         fixture.pauseScan = false
         fixture.scanGate?.resume(); fixture.scanGate = nil
         await wait { !fixture.update.isRunning }
-        precondition(fixture.events.suffix(3) == ["update", "scan:other", "metadata"])
+        precondition(fixture.update.state == .cancelled)
 
         precondition(changing.beginEditing())
         changing.draft.share = "new-saved"
@@ -143,6 +143,20 @@ import Foundation
         changing.endEditing()
         await wait { !fixture.update.isRunning }
         precondition(fixture.events.suffix(3) == ["update", "scan:new-saved", "metadata"])
+
+        // 保存成功がbackground中なら未開始要求だけを次のactiveで実行。
+        fixture.update.scenePhaseChanged(.background)
+        changing.draft.share = "background-save"
+        let backgroundSaved = await changing.save()
+        precondition(backgroundSaved && !fixture.update.isRunning)
+        let pendingCount = fixture.events.count
+        fixture.update.scenePhaseChanged(.background)
+        fixture.update.scenePhaseChanged(.active)
+        await wait { !fixture.update.isRunning }
+        precondition(fixture.events.count == pendingCount + 3)
+        fixture.update.scenePhaseChanged(.inactive)
+        fixture.update.scenePhaseChanged(.active)
+        precondition(fixture.events.count == pendingCount + 3)
 
         // 更新失敗はローカルtimelineへ伝播させない。indexあり／なしの両方を確認。
         let repository = try MediaRepository(url: URL(fileURLWithPath: CommandLine.arguments[1]))
@@ -162,6 +176,12 @@ import Foundation
         await local.reloadIfEmpty()
         precondition(fixture.update.state == .failed && fixture.update.errorMessage != nil)
         precondition(local.loadedCount == 1 && local.displayGeneration == display && local.blocks.flatMap(\.items).map(\.id) == localIDs)
+        let nextRun = try await repository.begin(settings: savedSettings)
+        let newer = ScannedMedia(path: "new.jpg", size: 100, creation: Date().addingTimeInterval(60), modified: Date())
+        try await repository.ingest([file, newer], ticket: nextRun, progress: .init())
+        _ = try await repository.finish(nextRun, progress: .init(), completed: true)
+        await local.reloadAfterUpdate()
+        precondition(local.loadedCount == 2 && local.displayGeneration != display && local.selectedMonth == nil)
         var absentSettings = savedSettings; absentSettings.share = "no-index"
         let empty = TimelineController(source: .local(repository: timeline, settings: absentSettings))
         await empty.loadInitial(); await empty.reloadIfEmpty()
@@ -170,7 +190,7 @@ import Foundation
         fixture.failReadPassword = true
         let keychainUnavailable = fixture.controller()
         precondition(keychainUnavailable.savedSettings == savedSettings && keychainUnavailable.message != nil)
-        precondition(local.blocks.flatMap(\.items).map(\.id) == localIDs)
+        precondition(local.loadedCount == 2)
         fixture.failReadPassword = false
 
 
@@ -179,7 +199,7 @@ import Foundation
         fixture.failCheck = true
         let failedInSheet = await changing.save()
         precondition(!failedInSheet && changing.draft.share == "rejected" && changing.savedSettings == savedSettings)
-        precondition(local.blocks.flatMap(\.items).map(\.id) == localIDs)
+        precondition(local.loadedCount == 2)
         changing.endEditing()
         fixture.failUpdate = false; fixture.failCheck = false
         fixture.pauseScan = true
@@ -188,9 +208,17 @@ import Foundation
         let manualStartCount = fixture.events.count
         for _ in 0..<10 { fixture.update.requestUpdate() }
         precondition(fixture.events.count == manualStartCount)
+        precondition(changing.beginEditing())
+        fixture.failCheck = true
+        let failedWhileRunning = Task { await changing.save() }
+        await wait { fixture.update.isCheckingConnection }
         fixture.pauseScan = false; fixture.scanGate?.resume(); fixture.scanGate = nil
-        await wait { !fixture.update.isRunning }
-        print("PASS: settings-sheet lifecycle, discard/retain old settings, pending drain restart, save/new settings, local timeline with update failure, empty index/failure, failed check retention, manual deduplication")
+        let rejectedWhileRunning = await failedWhileRunning.value
+        precondition(!rejectedWhileRunning)
+        let afterRejected = fixture.events.count
+        changing.endEditing()
+        precondition(!fixture.update.isRunning && fixture.events.count == afterRejected)
+        print("PASS: settings-sheet lifecycle, discard/retain old settings, no automatic drain restart, save/new settings, local timeline with update failure, empty index/failure, failed check retention, manual deduplication")
         print("PASS: absent/corrupt/invalid/saved routing, missing password, retained input, save failure, navigate-before-update, connection drain and active suppression, library setting change")
     }
 }

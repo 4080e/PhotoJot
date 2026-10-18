@@ -20,6 +20,36 @@ actor MediaRepository {
         return context
     }
 
+    private func library(settings: SMBConnectionSettings, in context: ModelContext) throws -> Library? {
+        let scope = [settings.host, String(settings.port), settings.domain, settings.username,
+                     settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")
+        return try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.scopeKey == scope })).first
+    }
+
+    // 認証・通信前に空Libraryを保存し、初回失敗・中断を次回起動で再試行しない。
+    func prepareInitialUpdate(settings: SMBConnectionSettings) throws -> Bool {
+        let context = context()
+        guard try library(settings: settings, in: context) == nil else { return false }
+        let scope = [settings.host, String(settings.port), settings.domain, settings.username,
+                     settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")
+        context.insert(Library(scopeKey: scope, connectionData: try JSONEncoder().encode(settings),
+                               displayName: settings.share + (settings.rootPath.isEmpty ? "" : "/" + settings.rootPath)))
+        try context.save()
+        return true
+    }
+
+    func saveSuccessfulUpdate(settings: SMBConnectionSettings) throws {
+        let context = context()
+        guard let library = try library(settings: settings, in: context) else { throw IndexFailure.invalidState }
+        try Task.checkCancellation()
+        library.lastSuccessfulUpdateAt = Date()
+        try context.save()
+    }
+
+    func lastSuccessfulUpdate(settings: SMBConnectionSettings) throws -> Date? {
+        try library(settings: settings, in: context())?.lastSuccessfulUpdateAt
+    }
+
     func begin(settings: SMBConnectionSettings) throws -> ScanTicket {
         let context = context()
         let data = try JSONEncoder().encode(settings)

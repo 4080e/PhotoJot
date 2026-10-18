@@ -25,6 +25,10 @@ nonisolated struct LibraryUpdateConnection: Sendable {
     private(set) var isEditingSettings = false
     @ObservationIgnored private var deferredUpdateRequested = false
     @ObservationIgnored private var connectionConfigured = true
+    @ObservationIgnored private var startupChecked = false
+    @ObservationIgnored private var savedUpdatePending = false
+    @ObservationIgnored private let prepareInitialUpdate: () async throws -> Bool
+    @ObservationIgnored private let saveSuccess: (LibraryUpdateConnection) async throws -> Void
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var lastScenePhase: ScenePhase?
@@ -34,7 +38,11 @@ nonisolated struct LibraryUpdateConnection: Sendable {
 
     init(connection: @escaping () throws -> LibraryUpdateConnection,
          scan: @escaping (LibraryUpdateConnection, @Sendable @escaping (ScanProgress) async -> Void) async throws -> Int,
-         metadata: @escaping (LibraryUpdateConnection, @Sendable @escaping (MetadataProgress) async -> Void) async throws -> Void) {
+         metadata: @escaping (LibraryUpdateConnection, @Sendable @escaping (MetadataProgress) async -> Void) async throws -> Void,
+         prepareInitialUpdate: @escaping () async throws -> Bool = { false },
+         saveSuccess: @escaping (LibraryUpdateConnection) async throws -> Void = { _ in }) {
+        self.prepareInitialUpdate = prepareInitialUpdate
+        self.saveSuccess = saveSuccess
         self.connection = connection
         self.scan = scan
         self.metadata = metadata
@@ -44,7 +52,12 @@ nonisolated struct LibraryUpdateConnection: Sendable {
         guard lastScenePhase != phase else { return }
         lastScenePhase = phase
         switch phase {
-        case .active: requestUpdate()
+        case .active:
+            if savedUpdatePending { requestUpdate() }
+            else if !startupChecked, connectionConfigured, !isEditingSettings, !isCheckingConnection {
+                startupChecked = true
+                startUpdate(initialOnly: true)
+            }
         case .background: cancel()
         case .inactive: break
         @unknown default: break
@@ -62,6 +75,13 @@ nonisolated struct LibraryUpdateConnection: Sendable {
             if state == .cancelling { restartRequested = true }
             return
         }
+        startupChecked = true
+        savedUpdatePending = false
+        startUpdate(initialOnly: false)
+    }
+
+    private func startUpdate(initialOnly: Bool) {
+        guard task == nil else { return }
         state = .running; phase = .preparing
         errorMessage = nil; missingCount = nil; libraryName = nil
         scanProgress = ScanProgress(); metadataProgress = MetadataProgress()
@@ -75,6 +95,9 @@ nonisolated struct LibraryUpdateConnection: Sendable {
                 if restart { requestUpdate() }
             }
             do {
+                if initialOnly {
+                    guard try await prepareInitialUpdate() else { state = .idle; return }
+                }
                 try Task.checkCancellation()
                 let snapshot = try connection()
                 libraryName = snapshot.settings.share + (snapshot.settings.rootPath.isEmpty ? "" : "/" + snapshot.settings.rootPath)
@@ -88,6 +111,7 @@ nonisolated struct LibraryUpdateConnection: Sendable {
                     await self?.setMetadataProgress(value)
                 }
                 try Task.checkCancellation()
+                try await saveSuccess(snapshot)
                 state = .completed
             } catch is CancellationError {
                 state = .cancelled
@@ -107,6 +131,13 @@ nonisolated struct LibraryUpdateConnection: Sendable {
         task?.cancel()
     }
 
+    // 保存成功による未開始要求だけはbackgroundを越えて保持する。
+    func requestUpdateAfterSaving() {
+        startupChecked = true
+        savedUpdatePending = true
+        requestUpdate()
+    }
+
     func setConnectionConfigured(_ configured: Bool) { connectionConfigured = configured }
 
     func beginSettingsEditing() {
@@ -117,15 +148,14 @@ nonisolated struct LibraryUpdateConnection: Sendable {
 
     func endSettingsEditing() {
         isEditingSettings = false
-        if deferredUpdateRequested { requestUpdate() }
+        if deferredUpdateRequested || savedUpdatePending { requestUpdate() }
     }
 
     // 保存操作中だけ更新開始を抑止。古い接続設定のTaskが終了してから接続確認する。
     func beginConnectionCheck() async {
         isCheckingConnection = true
-        let shouldResume = isRunning || deferredUpdateRequested
+        savedUpdatePending = false
         cancel()
-        if shouldResume { deferredUpdateRequested = true }
         await task?.value
     }
 

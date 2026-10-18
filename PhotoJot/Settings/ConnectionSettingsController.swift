@@ -8,6 +8,9 @@ import Observation
     private(set) var isSaving = false
     private(set) var isEditing = false
     private(set) var message: String?
+    private(set) var lastSuccessfulUpdateAt: Date?
+    var updateState: LibraryUpdateController.State { update.state }
+    @ObservationIgnored private let lastSuccessfulUpdate: (SMBConnectionSettings) async throws -> Date?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let update: LibraryUpdateController
     @ObservationIgnored private let readPassword: (String) throws -> String?
@@ -26,7 +29,9 @@ import Observation
          check: @escaping (SMBConnectionSettings, String) async throws -> Void,
          editingChanged: @escaping (Bool) -> Void = { _ in },
          beginThumbnailCheck: @escaping () async -> Void = {},
-         endThumbnailCheck: @escaping () -> Void = {}) {
+         endThumbnailCheck: @escaping () -> Void = {},
+         lastSuccessfulUpdate: @escaping (SMBConnectionSettings) async throws -> Date? = { _ in nil }) {
+        self.lastSuccessfulUpdate = lastSuccessfulUpdate
         self.editingChanged = editingChanged
         self.beginThumbnailCheck = beginThumbnailCheck; self.endThumbnailCheck = endThumbnailCheck
         self.defaults = defaults; self.update = update
@@ -65,6 +70,17 @@ import Observation
         update.endSettingsEditing()
     }
 
+    func loadLastSuccessfulUpdate() async {
+        let settings = savedSettings
+        lastSuccessfulUpdateAt = nil
+        guard let settings else { return }
+        do {
+            let date = try await lastSuccessfulUpdate(settings)
+            guard savedSettings == settings else { return }
+            lastSuccessfulUpdateAt = date
+        } catch { message = error.localizedDescription }
+    }
+
     func loadPassword() {
         password = ""
         do { password = try readPassword(draft.credentialAccount) ?? "" }
@@ -99,7 +115,7 @@ import Observation
                 }
             }
             onSaved()
-            update.requestUpdate()
+            update.requestUpdateAfterSaving()
             return true
         } catch is CancellationError {
             message = "接続確認を中断しました。もう一度お試しください。"

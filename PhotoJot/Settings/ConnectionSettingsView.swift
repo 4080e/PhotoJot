@@ -6,6 +6,15 @@ struct ConnectionSettingsView: View {
 
     var body: some View {
         Form {
+            if controller.savedSettings != nil {
+                Section {
+                    LabeledContent("最終更新") {
+                        if let date = controller.lastSuccessfulUpdateAt {
+                            Text(date, format: .dateTime.year().month(.twoDigits).day(.twoDigits).hour().minute())
+                        } else { Text("未更新") }
+                    }
+                }
+            }
             Section("接続先") {
                 TextField("ホスト名 / IPアドレス", text: $controller.draft.host).keyboardType(.URL)
                 TextField("共有名", text: $controller.draft.share)
@@ -28,6 +37,10 @@ struct ConnectionSettingsView: View {
                 }
             }
             if let message = controller.message { Section { Text(message).foregroundStyle(.red) } }
+        }
+        .task(id: controller.savedSettings) { await controller.loadLastSuccessfulUpdate() }
+        .onChange(of: controller.updateState) { _, state in
+            if state == .completed { Task { await controller.loadLastSuccessfulUpdate() } }
         }
         .disabled(controller.isSaving)
         .textInputAutocapitalization(.never)

@@ -56,6 +56,12 @@ import SwiftUI
             try await scan.scan(settings: connection.settings, password: connection.password, progress: progress)
         }, metadata: { connection, progress in
             try await metadata.complete(settings: connection.settings, password: connection.password, progress: progress)
+        }, prepareInitialUpdate: {
+            guard let data = UserDefaults.standard.data(forKey: SMBConnectionSettings.storageKey) else { return false }
+            let settings = try JSONDecoder().decode(SMBConnectionSettings.self, from: data).validated()
+            return try await repository.prepareInitialUpdate(settings: settings)
+        }, saveSuccess: { connection in
+            try await repository.saveSuccessfulUpdate(settings: connection.settings)
         })
         let credentials = CredentialStore()
         let thumbnails = ThumbnailSession(cache: .applicationCache(), resolve: { id, libraryID in
@@ -88,7 +94,8 @@ import SwiftUI
                 _ = try await access.checkConnection(settings: settings, password: password)
             }, editingChanged: { viewer.setEditing($0); thumbnails.setEditing($0) },
             beginThumbnailCheck: { await viewer.stop(); await thumbnails.beginConnectionCheck() },
-            endThumbnailCheck: { thumbnails.endConnectionCheck() })
+            endThumbnailCheck: { thumbnails.endConnectionCheck() },
+            lastSuccessfulUpdate: { try await repository.lastSuccessfulUpdate(settings: $0) })
         return Dependencies(update: update, connection: connection,
                             timeline: TimelineRepository(store: repository), thumbnails: thumbnails, viewer: viewer)
     }

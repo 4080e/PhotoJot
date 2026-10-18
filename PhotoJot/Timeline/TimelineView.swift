@@ -106,7 +106,7 @@ struct TimelineView: View {
         .onChange(of: update.state) { _, state in
             if state == .completed || state == .failed || state == .cancelled {
                 thumbnails.revalidateVisibleItems()
-                Task { await model.reloadIfEmpty() }
+                if state == .completed { Task { await model.reloadAfterUpdate() } }
             }
         }
         .safeAreaInset(edge: .bottom) {
