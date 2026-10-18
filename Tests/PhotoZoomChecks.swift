@@ -141,10 +141,15 @@ import AVKit
     let playerSurface = UIView(); view.addSubview(playerSurface)
     let playerPan = UIPanGestureRecognizer(); playerSurface.addGestureRecognizer(playerPan)
     gesture.isVideo = { true }
-    precondition(gesture.gestureRecognizer(gesture.pan, shouldRequireFailureOf: playerPan))
-    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRequireFailureOf: view.panGestureRecognizer))
+    precondition(gesture.gestureRecognizer(gesture.pan, shouldRecognizeSimultaneouslyWith: playerPan))
+    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRecognizeSimultaneouslyWith: view.panGestureRecognizer))
+    let playerTap = UITapGestureRecognizer(); playerSurface.addGestureRecognizer(playerTap)
+    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRecognizeSimultaneouslyWith: playerTap))
+    let unrelatedPan = UIPanGestureRecognizer(); root.view.addGestureRecognizer(unrelatedPan)
+    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRecognizeSimultaneouslyWith: unrelatedPan))
+    root.view.removeGestureRecognizer(unrelatedPan)
     gesture.isVideo = { false }
-    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRequireFailureOf: playerPan))
+    precondition(!gesture.gestureRecognizer(gesture.pan, shouldRecognizeSimultaneouslyWith: playerPan))
     permitted = false; gesture.begin(); precondition(!gesture.isBusy)
     permitted = true; gesture.begin(); gesture.move(to: 120)
     precondition(!view.isScrollEnabled && view.transform.ty == 120 && progress == 0.2)

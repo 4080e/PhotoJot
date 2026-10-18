@@ -51,10 +51,13 @@ import UIKit
               pan.numberOfTouches == 1 else { return false }
         return Self.downward(pan.velocity(in: view.superview))
     }
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
-        // Give public player gestures first refusal; do not inspect private AVKit views.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        // Waiting for every AVKit recognizer to fail prevents downward dismissal.
+        // Share pans on the video surface; control touches are excluded above and
+        // the directional gate still gives horizontal movement to the pager.
         guard isVideo(), let view, other !== view.panGestureRecognizer,
-              other !== pan, let otherView = other.view else { return false }
+              gestureRecognizer === pan, other !== pan, other is UIPanGestureRecognizer,
+              let otherView = other.view else { return false }
         return otherView !== view && otherView.isDescendant(of: view)
     }
     @objc private func drag(_ pan: UIPanGestureRecognizer) {
