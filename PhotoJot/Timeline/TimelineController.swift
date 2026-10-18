@@ -301,10 +301,6 @@ struct TimelineScrollRequest: Equatable {
     }
 
     func heading(for block: TimelineBlock) -> String {
-        guard let group = block.group else { return "日時不明" }
-        let components = group.day.split(separator: "-").compactMap { Int($0) }
-        let day = components.count == 3
-            ? "\(components[0])年\(components[1])月\(components[2])日" : group.day
-        return day
+        TimelineDate.dayTitle(for: block.group)
     }
 }

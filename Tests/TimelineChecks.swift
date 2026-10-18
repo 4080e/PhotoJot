@@ -5,6 +5,15 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
 
 @main struct TimelineChecks {
     static func main() async throws {
+        for kind in TimelineDateKind.allCases {
+            let date = TimelineDate(calendarDateTime: "2024-01-02T00:05:00", recordedOffset: "+14:00",
+                                    kind: kind, source: nil, quality: nil)
+            check(date.dayTitle == "2024年1月2日", "viewer uses stored calendar day without timezone conversion")
+            check(date.dayTitle == TimelineDate.dayTitle(for: date.groupKey), "viewer and section share day title")
+        }
+        let unknown = TimelineDate(calendarDateTime: nil, recordedOffset: nil, kind: .unknown, source: nil, quality: nil)
+        check(unknown.dayTitle == "日時不明", "unknown viewer day")
+        check(TimelineDate.dayTitle(for: TimelineGroupKey(day: "2024-12-31")) == "2024年12月31日", "different page day")
         for (rawOffset, savedOffset, expected) in [("+0900", "+09:00", "+09:00"), ("+09:00", "+0900", "+09:00"), ("Z", "+0000", "+00:00"), ("-0530", "-05:30", "-05:30")] {
             let parsed = TimelineDates.localCalendar("2022-04-30T17:14:00" + rawOffset, separateOffset: savedOffset, subsecond: nil)
             check(parsed?.date == "2022-04-30T17:14:00" && parsed?.offset == expected, "compact/colon/Z normalization")

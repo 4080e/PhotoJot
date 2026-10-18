@@ -8,10 +8,9 @@ struct MediaViewerView: View {
     let onClose: (TimelineItem) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var scale
-    @ScaledMetric(relativeTo: .footnote) private var informationMaximumHeight = 104.0
     @State private var dismissProgress: CGFloat = 0
     @State private var closing = false
-    @State private var informationContentHeight: CGFloat = 0
+    @State private var showsInformation = false
     init(item: TimelineItem, model: MediaViewerController, repository: TimelineRepository, thumbnails: ThumbnailSession, onClose: @escaping (TimelineItem) -> Void) {
         self.thumbnails = thumbnails
         self.model = model
@@ -49,24 +48,23 @@ struct MediaViewerView: View {
                         }
                     }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                information.opacity(1 - dismissProgress)
-                    .allowsHitTesting(dismissProgress == 0)
-            }
+            .navigationTitle(session.currentItem.date.dayTitle)
             .toolbar {
-                if session.currentItem.mediaType == "photo" {
-                    ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") { close(animated: true) }
+                        .disabled(model.isClosing || closing || dismissProgress > 0)
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("ファイル情報", systemImage: "info.circle") { showsInformation = true }
+                        .labelStyle(.iconOnly)
+                        .disabled(model.isClosing || closing || dismissProgress > 0)
+                    if session.currentItem.mediaType == "photo" {
                         Button("右に90°回転", systemImage: "rotate.right") { model.photo.zoom.rotateRight() }
                             .labelStyle(.iconOnly)
                             .disabled(model.image == nil || model.showsLoading || model.isClosing || closing ||
                                       model.activeItem?.id != session.currentItem.id ||
                                       model.photo.zoom.pinching || dismissProgress > 0)
                     }
-                }
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") {
-                        close(animated: true)
-                    }.disabled(model.isClosing || closing || dismissProgress > 0)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -76,6 +74,11 @@ struct MediaViewerView: View {
         .presentationBackground(.clear)
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled()
+        .sheet(isPresented: $showsInformation) {
+            ViewerInformationSheet(calendarDateTime: session.currentItem.date.calendarDateTime,
+                                   relativePath: session.currentItem.relativePath)
+                .interactiveDismissDisabled(false)
+        }
         .task { session.begin() }
         .onDisappear {
             session.close()
@@ -97,27 +100,35 @@ struct MediaViewerView: View {
         }
     }
 
-    private var information: some View {
-        let item = session.currentItem
-        let value = MediaViewerInformation(calendarDateTime: item.date.calendarDateTime, relativePath: item.relativePath)
-        return ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(value.dateText)
-                Text(value.folder)
-                Text(value.filename)
+}
+
+private struct ViewerInformationSheet: View {
+    let calendarDateTime: String?
+    let relativePath: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let value = MediaViewerInformation(calendarDateTime: calendarDateTime, relativePath: relativePath)
+        NavigationStack {
+            Form {
+                Section("撮影日時") { informationText(value.dateText) }
+                Section("ファイル名") { informationText(value.filename) }
+                Section("フォルダ名") { informationText(value.folder) }
             }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
-                informationContentHeight = $0
+            .navigationTitle("ファイル情報")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("閉じる") { dismiss() }
+                }
             }
         }
-        .frame(height: min(informationContentHeight, informationMaximumHeight))
-        .background(.bar)
     }
 
+    private func informationText(_ text: String) -> some View {
+        Text(text)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+    }
 }

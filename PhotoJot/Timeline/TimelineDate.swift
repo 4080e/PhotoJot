@@ -32,6 +32,17 @@ nonisolated struct TimelineDate: Sendable, Equatable {
         calendarDateTime.map { TimelineGroupKey(day: String($0.prefix(10))) }
     }
 
+    var dayTitle: String {
+        Self.dayTitle(for: groupKey)
+    }
+
+    static func dayTitle(for group: TimelineGroupKey?) -> String {
+        guard let group else { return "日時不明" }
+        let components = group.day.split(separator: "-").compactMap { Int($0) }
+        return components.count == 3
+            ? "\(components[0])年\(components[1])月\(components[2])日" : group.day
+    }
+
     func sortKey(id: UUID) -> String {
         // !は数字より前。小数の末尾0を除くことで.1と.100は同順位、.1001は.1より新しい。
         // UUIDまで含めて一意にし、known/unknownを同じkeyset queryで取得する。
