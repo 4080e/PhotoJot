@@ -25,6 +25,8 @@ nonisolated struct TimelinePage: Sendable {
     let items: [TimelineItem]
     let next: TimelineCursor?
     let revision: Int64
+    var initialAnchorID: UUID? = nil
+    var newerNext: TimelineCursor? = nil
 }
 nonisolated enum TimelineError: LocalizedError {
     case noLibrary, needsPreparation, changedDuringRead
@@ -213,7 +215,7 @@ extension MediaRepository {
         return try timelinePage(libraryID: libraryID, after: nil, startingKey: (key?.isEmpty == false ? key! : item.sortKey) + "~")
     }
 
-    func timelinePage(libraryID: UUID, after cursor: TimelineCursor?, startingAt month: TimelineMonth? = nil, newer: Bool = false, startingKey: String? = nil) throws -> TimelinePage {
+    func timelinePage(libraryID: UUID, after cursor: TimelineCursor?, startingAt month: TimelineMonth? = nil, newer: Bool = false, startingKey: String? = nil, limit: Int = TimelinePolicy.pageSize) throws -> TimelinePage {
         try Task.checkCancellation()
         let context = context()
         let library = try timelineLibrary(libraryID, context: context)
@@ -226,6 +228,26 @@ extension MediaRepository {
         guard library.timelinePreparedVersion == TimelinePolicy.version else { throw TimelineError.needsPreparation }
         let version = TimelinePolicy.version
         let present = presentTimeline(library)
+        let monthStart = month?.upperBound
+        if let month, cursor == nil, startingKey == nil, !newer {
+            let lower = month.lowerBound
+            let upper = month.upperBound
+            var oldest = FetchDescriptor<MediaEntry>(predicate: #Predicate {
+                present.evaluate($0) && $0.timelineSortKey >= lower && $0.timelineSortKey < upper
+            }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .forward)])
+            oldest.fetchLimit = 1
+            if let anchor = try context.fetch(oldest).first {
+                // 同じactor処理内で前後を取得し、一度に表示する。通常ページの200件は変更しない。
+                let boundary = TimelineCursor(libraryID: libraryID, revision: revision,
+                                              keyVersion: version, lastKey: anchor.timelineSortKey)
+                let olderPage = try timelinePage(libraryID: libraryID, after: nil,
+                                                startingKey: anchor.timelineSortKey + "~", limit: 101)
+                let newerPage = try timelinePage(libraryID: libraryID, after: boundary, newer: true, limit: 100)
+                return TimelinePage(items: newerPage.items + olderPage.items, next: olderPage.next,
+                                    revision: revision, initialAnchorID: anchor.id, newerNext: newerPage.next)
+            }
+            // 空の月は従来の上限境界から取得する。
+        }
         var fetch: FetchDescriptor<MediaEntry>
         if newer, let cursor {
             let first = cursor.lastKey
@@ -233,7 +255,7 @@ extension MediaRepository {
             fetch = FetchDescriptor(predicate: #Predicate {
                 present.evaluate($0) && $0.timelineSortKey > first
             }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .forward)])
-        } else if let last = cursor?.lastKey ?? startingKey ?? month?.upperBound {
+        } else if let last = cursor?.lastKey ?? startingKey ?? monthStart {
             fetch = FetchDescriptor(predicate: #Predicate {
                 present.evaluate($0) && $0.timelineSortKey < last
             }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .reverse)])
@@ -241,9 +263,9 @@ extension MediaRepository {
             fetch = FetchDescriptor(predicate: present, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical, order: .reverse)])
         }
         // 1件先読みして最終ページを判断。深いページでもoffsetや全件Swift sortを使わない。
-        fetch.fetchLimit = TimelinePolicy.pageSize + 1
+        fetch.fetchLimit = limit + 1
         let rows = try context.fetch(fetch)
-        var items = rows.prefix(TimelinePolicy.pageSize).map { entry in
+        var items = rows.prefix(limit).map { entry in
             TimelineItem(id: entry.id, libraryID: entry.libraryID, relativePath: entry.relativePath,
                          mediaType: entry.mediaType, fileExtension: entry.fileExtension, generation: entry.generation,
                          date: TimelineDates.resolve(entry), sortKey: entry.timelineSortKey,
@@ -251,7 +273,7 @@ extension MediaRepository {
         }
         if newer { items.reverse() }
         let boundary = newer ? items.first : items.last
-        let next = rows.count > TimelinePolicy.pageSize ? boundary.map {
+        let next = rows.count > limit ? boundary.map {
             TimelineCursor(libraryID: libraryID, revision: revision, keyVersion: version, lastKey: $0.sortKey)
         } : nil
         return TimelinePage(items: items, next: next, revision: revision)

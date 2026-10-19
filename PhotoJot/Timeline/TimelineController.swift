@@ -62,6 +62,7 @@ struct TimelineScrollRequest: Equatable {
     private(set) var errorMessage: String?
     private(set) var emptyMessage = "保存済みの対象メディアがありません。"
     private(set) var displayGeneration = UUID()
+    private(set) var initialJumpItemID: UUID?
     private(set) var selectedMonth: TimelineMonth?
     private(set) var displayedMonth: TimelineMonth?
     private(set) var isViewerWindow = false
@@ -207,6 +208,12 @@ struct TimelineScrollRequest: Equatable {
     }
 
     private func configureNewer(_ page: TimelinePage, preservingViewport: Bool = false) {
+        if let anchorID = page.initialAnchorID {
+            initialJumpItemID = anchorID
+            newerCursor = page.newerNext
+            hasNewer = newerCursor != nil
+            return
+        }
         newerCursor = selectedMonth == nil && !preservingViewport ? nil : page.items.first.map {
             TimelineCursor(libraryID: $0.libraryID, revision: page.revision,
                            keyVersion: TimelinePolicy.version, lastKey: $0.sortKey)
@@ -282,6 +289,7 @@ struct TimelineScrollRequest: Equatable {
 
     private func reset(preservingViewport: Bool = false) {
         blocks = []; loadedCount = 0
+        initialJumpItemID = nil
         hasLoaded = false; hasMore = false; cursor = nil; loadTriggerIDs = []
         newerCursor = nil; hasNewer = false; newerErrorMessage = nil
         if !preservingViewport {

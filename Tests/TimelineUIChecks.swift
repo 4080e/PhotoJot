@@ -218,11 +218,13 @@ private actor PageFeed {
         }
         let august = (0..<205).map { dated("aug/\($0).jpg", "2024-08-31T23:59:59Z") }
         let newerFiles = (0..<450).map { dated("newer/\($0).jpg", "2024-09-01T00:00:00Z") }
-        let monthFiles = august + newerFiles + [
+        let olderFiles = (0..<450).map { dated("older/\($0).jpg", "2024-07-20T12:00:00Z") }
+        let monthFiles = august + newerFiles + olderFiles + [
             dated("latest.mov", "2025-01-01T00:00:00Z"),
             dated("september.jpg", "2024-09-01T00:00:00Z"),
             dated("aug-start.jpg", "2024-08-01T00:00:00Z"),
-            dated("july.jpg", "2024-07-31T23:59:59Z"),
+            dated("july.jpg", "2024-07-05T12:00:00Z"),
+            dated("july-later.mov", "2024-07-31T23:59:59Z"),
             dated("january.jpg", "2024-01-01T00:00:00Z"),
             dated("december.jpg", "2023-12-31T23:59:59Z"),
             dated("unknown.jpg", nil)
@@ -247,52 +249,71 @@ private actor PageFeed {
         await jumping.jump(to: aug)
         check(jumping.selectedMonth == aug && jumping.displayGeneration != beforeJumpDisplay, "jump replaces origin")
         let jumped = jumping.blocks.flatMap(\.items)
-        check(jumped.count == 200 && jumped.allSatisfy { $0.relativePath.hasPrefix("aug/") }, "direct bounded page starts at newest in selected month")
+        check(jumped.count == 201 && jumped[100].relativePath == "aug-start.jpg", "100 newer + anchor + 100 older")
+        check(jumping.initialJumpItemID == jumped[100].id && jumping.hasNewer && jumping.hasMore, "jump target and both continuation cursors")
         check(jumped.map(\.sortKey) == jumped.map(\.sortKey).sorted(by: >), "tie order stable")
         let jumpDisplay = jumping.displayGeneration
+        let jumpVersion = jumping.contentVersion
+        for item in jumped[90...130] {
+            await jumping.loadNewerIfNeeded(visibleID: item.id)
+            await jumping.loadMoreIfNeeded(visibleID: item.id)
+        }
+        check(jumping.loadedCount == 201 && jumping.contentVersion == jumpVersion, "scroll near anchor does not append or prepend")
         await jumping.loadMoreIfNeeded(visibleID: jumped.last!.id)
         let entireJump = jumping.blocks.flatMap(\.items)
-        check(entireJump.count == 210 && Set(entireJump.map(\.id)).count == 210 && !jumping.hasMore, "next page no gaps or duplicates")
+        check(entireJump.count == 401 && Set(entireJump.map(\.id)).count == 401 && jumping.hasMore, "older continuation uses normal 200-item page without duplicates")
         check(entireJump.map(\.sortKey) == entireJump.map(\.sortKey).sorted(by: >), "ties stable across pages")
-        check(entireJump.last?.date.kind == .unknown, "unknown remains in normal paging")
         check(jumping.displayGeneration == jumpDisplay, "paging retains scroll identity")
         let anchor = entireJump[3].id
         jumping.visibleItemID = anchor
         let originalBlockID = jumping.blocks.first!.id
         await jumping.loadNewerIfNeeded(visibleID: anchor)
-        check(jumping.loadedCount == 410 && jumping.hasNewer, "newer fetch bounded to 200")
+        check(jumping.loadedCount == 601 && jumping.hasNewer, "newer continuation uses normal 200-item page")
         check(jumping.visibleItemID == anchor && jumping.displayGeneration == jumpDisplay, "prepend preserves current media anchor and scroll identity")
         check(jumping.blocks.contains { $0.id == originalBlockID }, "old block identity retained")
-        await jumping.loadNewerIfNeeded(visibleID: jumping.blocks.first!.items.first!.id)
-        check(jumping.loadedCount == 610 && jumping.hasNewer, "second newer page")
-        await jumping.loadNewerIfNeeded(visibleID: jumping.blocks.first!.items.first!.id)
+        while jumping.hasNewer {
+            await jumping.loadNewerIfNeeded(visibleID: jumping.blocks.first!.items.first!.id)
+        }
+        while jumping.hasMore {
+            await jumping.loadMoreIfNeeded(visibleID: jumping.blocks.last!.items.last!.id)
+        }
         let bidirectional = jumping.blocks.flatMap(\.items)
-        check(bidirectional.count == monthFiles.count && !jumping.hasNewer && !jumping.hasMore, "latest and oldest reached independently")
+        check(bidirectional.count == monthFiles.count, "latest and oldest reached independently")
         check(Set(bidirectional.map(\.id)).count == monthFiles.count, "no bidirectional duplicates")
-        check(bidirectional.map(\.sortKey) == bidirectional.map(\.sortKey).sorted(by: >), "stable date/UUID order across newer pages")
+        check(bidirectional.map(\.sortKey) == bidirectional.map(\.sortKey).sorted(by: >), "stable date/UUID order across both directions")
+        check(bidirectional.last?.date.kind == .unknown, "unknown remains in normal paging")
         await jumping.loadNewer()
         check(jumping.loadedCount == monthFiles.count, "stop after latest")
         await jumping.jump(to: aug)
         await jumping.loadNewer()
         await jumping.loadMoreIfNeeded(visibleID: jumping.blocks.last!.items.last!.id)
-        check(jumping.loadedCount == 410 && !jumping.hasMore && jumping.hasNewer, "older cursor still works after prepend")
+        check(jumping.loadedCount == 601 && jumping.hasMore && jumping.hasNewer, "older cursor still works after prepend")
         for (month, path) in [(TimelineMonth(year: 2025, month: 1), "latest.mov"),
                               (TimelineMonth(year: 2024, month: 1), "january.jpg"),
+                              (TimelineMonth(year: 2024, month: 7), "july.jpg"),
+                              (TimelineMonth(year: 2024, month: 6), "january.jpg"),
                               (TimelineMonth(year: 2023, month: 12), "december.jpg")] {
             await jumping.jump(to: month)
-            check(jumping.blocks.first?.items.first?.relativePath == path, "month/year boundary starts inclusively at newest")
+            let values = jumping.blocks.flatMap(\.items)
+            if month == TimelineMonth(year: 2024, month: 6) {
+                check(jumping.initialJumpItemID == nil && values.first?.relativePath == path, "empty month keeps previous behavior")
+            } else {
+                let target = values.firstIndex { $0.id == jumping.initialJumpItemID }!
+                check(values[target].relativePath == path && target <= 100 && values.count - target - 1 <= 100, "oldest media and bounded window at library ends")
+                check(jumping.hasNewer == (target == 100), "no unnecessary newer fetch when fewer than 100 newer items exist")
+            }
         }
         await jumping.jump(to: nil)
         check(!jumping.hasNewer && jumping.selectedMonth == nil && jumping.blocks.first?.items.first?.relativePath == "latest.mov", "return to latest")
         // 更新でcursorが失効しても、選択月の起点を維持して再取得する。
         await jumping.jump(to: aug)
-        let revisionAnchor = jumping.blocks.first!.items[37]
+        let revisionAnchor = jumping.blocks.flatMap(\.items)[1]
         jumping.visibleItemID = revisionAnchor.id
         let revisionJumpID = jumping.displayGeneration
         let refreshScan = try await repository.begin(settings: jumpSettings)
         try await repository.ingest([dated("extra.jpg", "2024-07-01T00:00:00Z")], ticket: refreshScan, progress: .init())
         _ = try await repository.finish(refreshScan, progress: .init(), completed: false)
-        await jumping.loadMoreIfNeeded(visibleID: jumping.blocks.last!.items.last!.id)
+        await jumping.loadNewerIfNeeded(visibleID: revisionAnchor.id)
         check(jumping.selectedMonth == aug && jumping.blocks.first!.items.first!.id == revisionAnchor.id, "revision refresh uses current media, not month origin")
         check(jumping.displayGeneration == revisionJumpID && jumping.visibleItemID == revisionAnchor.id, "revision never reapplies initial jump")
         // 通信待ちに相当するpage待ち中の重複要求と、表示中IDの変更を検証。

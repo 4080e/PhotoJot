@@ -49,11 +49,22 @@ struct TimelineGridView: UIViewRepresentable {
         var consumedReturnID: UUID?
         var applying = false
         var lastOffset: CGFloat = 0
+        private struct RotationAnchor {
+            let id: UUID
+            let header: Bool
+            let distance: CGFloat
+        }
+        private var rotationAnchor: RotationAnchor?
+        private var restoringRotation = false
         private var reportedMonth: TimelineMonth?
         private var titleTask: Task<Void, Never>?
         init(_ parent: TimelineGridView) { self.parent = parent }
 
         func install(_ view: UICollectionView) {
+            if let view = view as? TimelineCollectionView {
+                view.beforeGeometryChange = { [weak self] view in self?.saveRotationAnchor(in: view) }
+                view.afterLayout = { [weak self] view in self?.restoreRotationAnchor(in: view) }
+            }
             let cell = UICollectionView.CellRegistration<UICollectionViewCell, UUID> { [weak self] cell, _, id in
                 guard let self, let item = self.items[id] else { return }
                 cell.contentConfiguration = UIHostingConfiguration {
@@ -90,6 +101,53 @@ struct TimelineGridView: UIViewRepresentable {
             return nil
         }
 
+        private func saveRotationAnchor(in view: UICollectionView) {
+            guard !applying, !restoringRotation, rotationAnchor == nil,
+                  let media = anchor(in: view), let path = dataSource.indexPath(for: media.id) else { return }
+            let top = view.contentOffset.y + view.adjustedContentInset.top
+            if let header = view.layoutAttributesForSupplementaryElement(
+                ofKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: path.section)),
+               header.frame.maxY > top, header.frame.minY <= top + view.bounds.height,
+               let id = dataSource.sectionIdentifier(for: path.section) {
+                rotationAnchor = RotationAnchor(id: id, header: true, distance: header.frame.minY - top)
+            } else {
+                rotationAnchor = RotationAnchor(id: media.id, header: false, distance: CGFloat(media.distanceFromTop))
+            }
+        }
+
+        private func restoreRotationAnchor(in view: UICollectionView) {
+            guard !restoringRotation, let saved = rotationAnchor else { return }
+            let frame: CGRect?
+            if saved.header {
+                let sections = dataSource.snapshot().sectionIdentifiers
+                frame = sections.firstIndex(of: saved.id).flatMap {
+                    view.layoutAttributesForSupplementaryElement(ofKind: UICollectionView.elementKindSectionHeader,
+                                                                 at: IndexPath(item: 0, section: $0))?.frame
+                }
+            } else {
+                frame = dataSource.indexPath(for: saved.id).flatMap { view.layoutAttributesForItem(at: $0)?.frame }
+            }
+            guard let frame else { rotationAnchor = nil; return }
+            let minimum = -view.adjustedContentInset.top
+            let maximum = max(minimum, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+            let offset = min(max(frame.minY - saved.distance + minimum, minimum), maximum)
+            guard abs(view.contentOffset.y - offset) > 0.5 else { return }
+            restoringRotation = true
+            view.setContentOffset(CGPoint(x: view.contentOffset.x, y: offset), animated: false)
+            lastOffset = view.contentOffset.y
+            restoringRotation = false
+        }
+
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            // 列の組み替えで先頭セルが変わっても、操作再開までは同じIDを維持する。
+            rotationAnchor = nil
+        }
+
+        func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+            rotationAnchor = nil
+            return true
+        }
+
         func update(_ value: TimelineGridView, in view: UICollectionView) {
             parent = value
             // サムネイル完了やloading表示変更はsnapshot／位置指定を発行しない。
@@ -101,8 +159,9 @@ struct TimelineGridView: UIViewRepresentable {
                 return
             }
             guard !applying else { return }
-            view.layoutIfNeeded()
             let jump = consumedJumpID != value.jumpID
+            if jump { rotationAnchor = nil }
+            view.layoutIfNeeded()
             let saved = jump ? nil : anchor(in: view)
             let oldItems = items
             items = Dictionary(uniqueKeysWithValues: value.sections.flatMap(\.items).map { ($0.id, $0) })
@@ -120,7 +179,20 @@ struct TimelineGridView: UIViewRepresentable {
                 dataSource.apply(snapshot, animatingDifferences: false)
                 view.layoutIfNeeded()
                 if jump {
-                    view.setContentOffset(CGPoint(x: view.contentOffset.x, y: -view.adjustedContentInset.top), animated: false)
+                    if let id = value.model.initialJumpItemID, let path = dataSource.indexPath(for: id),
+                       let header = view.layoutAttributesForSupplementaryElement(
+                        ofKind: UICollectionView.elementKindSectionHeader,
+                        at: IndexPath(item: 0, section: path.section)) {
+                        // セルではなく対象日の見出しへ、初回だけ実測座標で合わせる。
+                        let minimum = -view.adjustedContentInset.top
+                        let maximum = max(minimum, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+                        let offset = min(max(header.frame.minY + minimum, minimum), maximum)
+                        view.setContentOffset(CGPoint(x: view.contentOffset.x, y: offset), animated: false)
+                    } else {
+                        view.setContentOffset(CGPoint(x: view.contentOffset.x, y: -view.adjustedContentInset.top), animated: false)
+                    }
+                } else if rotationAnchor != nil {
+                    restoreRotationAnchor(in: view)
                 } else if let saved {
                     // 削除された基準entryは、新しいwindowの先頭へ自然に引き継ぐ。
                     let id = items[saved.id] == nil ? snapshot.itemIdentifiers.first : saved.id
@@ -143,6 +215,7 @@ struct TimelineGridView: UIViewRepresentable {
                   consumedReturnID != request.id,
                   let path = dataSource.indexPath(for: request.mediaID) else { return }
             consumedReturnID = request.id
+            rotationAnchor = nil
             applying = true
             view.layoutIfNeeded()
             view.scrollToItem(at: path, at: .centeredVertically, animated: false)
@@ -169,7 +242,8 @@ struct TimelineGridView: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard let view = scrollView as? UICollectionView, !applying else { return }
+            guard let view = scrollView as? UICollectionView, !applying, !restoringRotation,
+                  (view as? TimelineCollectionView)?.isUpdatingGeometry != true else { return }
             let upward = view.contentOffset.y < lastOffset
             lastOffset = view.contentOffset.y
             recordViewport(view)
@@ -185,6 +259,9 @@ struct TimelineGridView: UIViewRepresentable {
         func collectionView(_ view: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt path: IndexPath) {
             guard let id = dataSource.itemIdentifier(for: path) else { return }
             Task {
+                // ジャンプ反映中に一時表示されたセルから追加取得しない。
+                guard !applying, let currentPath = dataSource.indexPath(for: id),
+                      view.indexPathsForVisibleItems.contains(currentPath) else { return }
                 recordViewport(view)
                 await parent.model.loadMoreIfNeeded(visibleID: id)
             }
@@ -232,12 +309,35 @@ final class TimelineCollectionView: UICollectionView {
         let lineSpacing: CGFloat
     }
     private var lastMetrics: Metrics?
+    var beforeGeometryChange: ((UICollectionView) -> Void)?
+    var afterLayout: ((UICollectionView) -> Void)?
+    private(set) var isUpdatingGeometry = false
+
+    override var frame: CGRect {
+        willSet {
+            if frame.size != newValue.size {
+                beforeGeometryChange?(self)
+                isUpdatingGeometry = true
+            }
+        }
+    }
+
+    override var bounds: CGRect {
+        willSet {
+            if bounds.size != newValue.size {
+                beforeGeometryChange?(self)
+                isUpdatingGeometry = true
+            }
+        }
+    }
 
     override func layoutSubviews() {
         invalidateMetricsIfNeeded()
         super.layoutSubviews()
         // super内でsafe area由来のadjustedContentInsetが更新された場合も最新値へ収束させる。
         if invalidateMetricsIfNeeded() { super.layoutSubviews() }
+        afterLayout?(self)
+        isUpdatingGeometry = false
     }
 
     @discardableResult
@@ -247,6 +347,8 @@ final class TimelineCollectionView: UICollectionView {
                               rightInset: adjustedContentInset.right, sectionInset: flow.sectionInset,
                               interitemSpacing: flow.minimumInteritemSpacing, lineSpacing: flow.minimumLineSpacing)
         guard metrics != lastMetrics else { return false }
+        if lastMetrics != nil { beforeGeometryChange?(self) }
+        isUpdatingGeometry = true
         lastMetrics = metrics
         let context = UICollectionViewFlowLayoutInvalidationContext()
         context.invalidateFlowLayoutDelegateMetrics = true

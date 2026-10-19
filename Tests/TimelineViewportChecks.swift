@@ -132,14 +132,8 @@ struct TimelineThumbnailCell: View {
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.setNeedsLayout()
         view.layoutIfNeeded()
+        coordinator.scrollViewWillBeginDragging(view)
         view.setContentOffset(CGPoint(x: 0, y: 505), animated: false)
-        let offsetBeforeRotation = view.contentOffset.y
-        view.frame.size.width = 932
-        view.layoutIfNeeded()
-        view.frame = originalFrame
-        view.layoutIfNeeded()
-        precondition(abs(view.contentOffset.y - offsetBeforeRotation) < 1, "rotation reset scroll offset")
-        precondition(coordinator.dataSource.snapshot().itemIdentifiers == original.map(\.id), "rotation changed snapshot")
         let anchor = coordinator.anchor(in: view)!
         func verify(_ anchor: TimelineViewportAnchor, _ label: String) {
             view.layoutIfNeeded()
@@ -148,11 +142,26 @@ struct TimelineThumbnailCell: View {
             let actual = frame.minY - view.contentOffset.y - view.adjustedContentInset.top
             precondition(abs(Double(actual) - anchor.distanceFromTop) < 1, "\(label): \(actual) != \(anchor.distanceFromTop)")
         }
+        for cycle in 1...4 {
+            view.frame.size = CGSize(width: 932, height: 350)
+            view.layoutIfNeeded()
+            verify(anchor, "landscape media anchor \(cycle)")
+            view.frame = originalFrame
+            view.layoutIfNeeded()
+            verify(anchor, "portrait media anchor \(cycle)")
+        }
+        precondition(coordinator.dataSource.snapshot().itemIdentifiers == original.map(\.id), "rotation changed snapshot")
+        // 回転途中のsnapshot更新も同じ回転基準で補正する。
+        view.frame.size = CGSize(width: 932, height: 350)
         let sections: [TimelineGridSection] = [.init(id: newSection, title: "2024年1月1日", items: newer), .init(id: oldSection, title: "2023年12月31日", items: original)]
         coordinator.update(value(sections, 2), in: view)
-        verify(anchor, "prepend across day")
+        verify(anchor, "prepend during rotation")
+        view.frame = originalFrame
+        view.layoutIfNeeded()
+        verify(anchor, "return portrait after prepend")
         await Task.yield()
         verify(anchor, "subsequent layout")
+        coordinator.scrollViewWillBeginDragging(view)
         view.setContentOffset(CGPoint(x: 0, y: view.contentOffset.y + 367), animated: false)
         let moved = coordinator.anchor(in: view)!
         let secondSections: [TimelineGridSection] = [.init(id: newSection, title: "2024年1月1日", items: newest + newer), .init(id: oldSection, title: "2023年12月31日", items: original)]
@@ -176,6 +185,7 @@ struct TimelineThumbnailCell: View {
         precondition(view.indexPathsForVisibleItems.contains(returnedPath), "returned item visible")
         await Task.yield()
         precondition(model.scrollRequest == nil && model.displayedMonth == original[180].date.month, "return consumed and month follows viewport")
+        coordinator.scrollViewWillBeginDragging(view)
         view.setContentOffset(CGPoint(x: 0, y: view.contentOffset.y + 400), animated: false)
         let afterReturn = coordinator.anchor(in: view)!
         coordinator.update(value(returnSections, 6, returnJump), in: view)
@@ -184,6 +194,62 @@ struct TimelineThumbnailCell: View {
         verify(afterReturn, "content update cannot reapply return")
         coordinator.update(value(secondSections, 8, returnJump), in: view)
         verify(afterReturn, "prepend after return keeps user viewport")
+        // 前後100件のwindowで、対象日の枚数に関係なく見出しと先頭セルを表示する。
+        for count in [1, 4, 5, 8, 9, 10, 101] {
+            func datedItems(_ range: Range<Int>, _ day: String) -> [TimelineItem] {
+                items(range).map { item in
+                    let date = TimelineDate(calendarDateTime: day + "T12:00:00", recordedOffset: nil, kind: .provisional, source: nil, quality: nil)
+                    return TimelineItem(id: item.id, libraryID: library, relativePath: item.relativePath,
+                                        mediaType: item.mediaType, fileExtension: item.fileExtension, generation: item.generation,
+                                        date: date, sortKey: date.sortKey(id: item.id), metadataState: nil, metadataIsCurrent: false)
+                }
+            }
+            let before = datedItems(2000..<(2101 - count), "2024-01-02")
+            let target = datedItems(3000..<(3000 + count), "2024-01-01")
+            let after = datedItems(4000..<4100, "2023-12-31")
+            let windowItems = before + target + after
+            let monthSource = TimelinePageSource(prepare: { library },
+                                                page: { _, _ in fatalError("unexpected older load near jump") },
+                                                monthPage: { _, _ in
+                TimelinePage(items: windowItems, next: nil, revision: 1,
+                             initialAnchorID: target.last!.id, newerNext: nil)
+            })
+            let monthModel = TimelineController(source: monthSource)
+            await monthModel.jump(to: TimelineMonth(year: 2024, month: 1))
+            let monthView = TimelineGridView(model: monthModel, thumbnails: session,
+                                            sections: monthModel.blocks.map { .init(id: $0.id, title: monthModel.heading(for: $0), items: $0.items) },
+                                            contentVersion: monthModel.contentVersion, jumpID: monthModel.displayGeneration,
+                                            footer: AnyView(Text("test")), footerHeight: 60, select: { _ in }, inspect: { _ in })
+            coordinator.update(monthView, in: view)
+            view.layoutIfNeeded()
+            let targetPath = coordinator.dataSource.indexPath(for: target.first!.id)!
+            let header = view.layoutAttributesForSupplementaryElement(ofKind: UICollectionView.elementKindSectionHeader,
+                                                                      at: IndexPath(item: 0, section: targetPath.section))!
+            precondition(abs(header.frame.minY - view.contentOffset.y - view.adjustedContentInset.top) < 1, "month day header aligns to top: \(count)")
+            precondition(view.indexPathsForVisibleItems.contains(targetPath), "first media of day visible: \(count)")
+            precondition(coordinator.dataSource.snapshot().numberOfItems == 201, "both sides installed together")
+            let portraitFrame = view.frame
+            for cycle in 1...3 {
+                view.frame.size = CGSize(width: 932, height: 350)
+                view.layoutIfNeeded()
+                view.frame = portraitFrame
+                view.layoutIfNeeded()
+                let restored = view.layoutAttributesForSupplementaryElement(ofKind: UICollectionView.elementKindSectionHeader,
+                                                                            at: IndexPath(item: 0, section: targetPath.section))!
+                precondition(abs(restored.frame.minY - view.contentOffset.y - view.adjustedContentInset.top) < 1,
+                             "month header survives rotation \(cycle), count \(count)")
+            }
+            await Task.yield()
+            for delta in [-80.0, 160.0] {
+                coordinator.scrollViewWillBeginDragging(view)
+                view.setContentOffset(CGPoint(x: 0, y: view.contentOffset.y + delta), animated: false)
+                let offset = view.contentOffset
+                coordinator.update(monthView, in: view)
+                await Task.yield()
+                precondition(view.contentOffset == offset && monthModel.loadedCount == 201, "nearby scrolling does not reapply jump or add pages")
+            }
+        }
+        print("PASS: month jump day header and first media visible for 1, 4, 5, 8, 9, 10, 101 items; nearby scrolling stays stable")
         print("PASS: viewer return visible, consumed once, month observation, no snap back on content or prepend")
         print("PASS: UIKit measured anchor survives 200-item prepend, day boundary, second prepend after user scrolling, repeat layout, unchanged snapshot, revision rebase; explicit jump consumed once")
         fflush(stdout)
