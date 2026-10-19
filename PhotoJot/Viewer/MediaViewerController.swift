@@ -11,6 +11,10 @@ import Observation
     @ObservationIgnored private var previewWork: Task<Void, Never>?
     @ObservationIgnored private var previewEpoch = UUID()
     private(set) var player: AVPlayer?
+    private(set) var videoQuarterTurns = 0
+    private(set) var isRotatingVideo = false
+    var videoRotationError: String?
+    @ObservationIgnored private var videoRotationWork: Task<Void, Never>?
     private(set) var message: String?
     private(set) var isLoading = false
     private(set) var isClosing = false
@@ -46,13 +50,74 @@ import Observation
         guard let item = activeItem, item.mediaType == "photo",
               image != nil, !showsLoading, !isClosing else { return }
         photo.zoom.rotateRight()
-        let value = photo.zoom.quarterTurns
+        enqueueRotationSave(photo.zoom.quarterTurns, for: item)
+    }
+
+    private func enqueueRotationSave(_ value: Int, for item: TimelineItem) {
         let previous = rotationSave
         rotationSave = Task {
             await previous?.value
             do { try await saveRotation(value, item.id, item.libraryID) }
             catch { rotationError = "回転角度を保存できませんでした。もう一度お試しください。" }
         }
+    }
+
+    func rotateVideoRight() {
+        guard let media = activeItem, media.mediaType == "video", !showsLoading, !isClosing, !isRotatingVideo,
+              let item = player?.currentItem, item.status == .readyToPlay else { return }
+        let next = (videoQuarterTurns + 1) % 4
+        isRotatingVideo = true
+        videoRotationWork = Task {
+            defer { isRotatingVideo = false }
+            do {
+                let composition = next == 0 ? nil : try await Self.videoComposition(asset: item.asset, quarterTurns: next)
+                try Task.checkCancellation()
+                guard player?.currentItem === item, !isClosing else { return }
+                // Keep the item, timeline, rate and audio unchanged. Replace the
+                // composition instance so paused frames can also be refreshed.
+                item.videoComposition = composition
+                videoQuarterTurns = next
+                enqueueRotationSave(next, for: media)
+            } catch is CancellationError {
+            } catch {
+                if !isClosing { videoRotationError = "この動画を回転できませんでした。" }
+            }
+        }
+    }
+
+    private static func videoComposition(asset: AVAsset, quarterTurns: Int) async throws -> AVVideoComposition {
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        // Do not guess the layout of multi-track movies.
+        guard tracks.count == 1, let track = tracks.first else { throw ViewerFailure.unavailable }
+        let size = try await track.load(.naturalSize)
+        let preferred = try await track.load(.preferredTransform)
+        let duration = try await asset.load(.duration)
+        guard size.width > 0, size.height > 0, duration.isNumeric, duration > .zero else {
+            throw ViewerFailure.unavailable
+        }
+        let base: AVVideoComposition = try await withCheckedThrowingContinuation { continuation in
+            AVVideoComposition.videoComposition(withPropertiesOf: asset) { composition, error in
+                if let composition { continuation.resume(returning: composition) }
+                else { continuation.resume(throwing: error ?? ViewerFailure.unavailable) }
+            }
+        }
+        try Task.checkCancellation()
+        guard let composition = base.mutableCopy() as? AVMutableVideoComposition else { throw ViewerFailure.unavailable }
+        let rotation = CGAffineTransform(rotationAngle: CGFloat(quarterTurns) * .pi / 2)
+        let transform = preferred.concatenating(rotation)
+        let bounds = CGRect(origin: .zero, size: size).applying(transform).standardized
+        guard bounds.width.isFinite, bounds.height.isFinite, bounds.width > 0, bounds.height > 0 else {
+            throw ViewerFailure.unavailable
+        }
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
+        layer.setTransform(transform.concatenating(CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY)), at: .zero)
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+        instruction.layerInstructions = [layer]
+        composition.instructions = [instruction]
+        // Round away tiny floating-point errors from quarter-turn transforms.
+        composition.renderSize = CGSize(width: bounds.width.rounded(), height: bounds.height.rounded())
+        return composition
     }
 
     // ページ確定時だけ呼ぶ。旧処理の終了中は最新の要求1件へ集約する。
@@ -102,7 +167,22 @@ import Observation
                     guard try await resource.asset.load(.isPlayable) else { throw ViewerFailure.unavailable }
                     try Task.checkCancellation()
                     guard try await resolve(item.id, item.libraryID)?.key == target.key else { throw ViewerFailure.changed }
-                    installPlayer(resource.asset)
+                    let rotation = try await loadRotation(item.id, item.libraryID)
+                    var composition: AVVideoComposition?
+                    var appliedRotation = 0
+                    if rotation != 0 {
+                        do {
+                            composition = try await Self.videoComposition(asset: resource.asset, quarterTurns: rotation)
+                            appliedRotation = rotation
+                        } catch is CancellationError { throw CancellationError() }
+                        catch {
+                            if !isClosing { videoRotationError = "この動画を回転できませんでした。" }
+                        }
+                    }
+                    try Task.checkCancellation()
+                    guard try await resolve(item.id, item.libraryID)?.key == target.key else { throw ViewerFailure.changed }
+                    videoQuarterTurns = appliedRotation
+                    installPlayer(resource.asset, composition: composition)
 
                 } else {
                     let rotation = try await loadRotation(item.id, item.libraryID)
@@ -130,8 +210,10 @@ import Observation
         }
     }
 
-    private func installPlayer(_ asset: AVURLAsset) {
+    private func installPlayer(_ asset: AVURLAsset, composition: AVVideoComposition?) {
         let playerItem = AVPlayerItem(asset: asset)
+        // Apply before exposing the player or starting autoplay to avoid an unrotated first frame.
+        playerItem.videoComposition = composition
         player = AVPlayer(playerItem: playerItem)
         awaitingAutoplay = true
         observation = playerItem.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
@@ -191,10 +273,15 @@ import Observation
     private func requestStop(message: String?) -> Task<Void, Never> {
         if let cleanup { return cleanup }
         isClosing = true
+        videoRotationWork?.cancel()
+        videoQuarterTurns = 0
+        videoRotationError = nil
         work?.cancel(); playback?.cancel(); photo.cancel()
         player?.pause(); player?.replaceCurrentItem(with: nil)
         let task = Task {
             await work?.value
+            await videoRotationWork?.value
+            videoRotationWork = nil
             await rotationSave?.value
             rotationSave = nil
             await releaseResources()

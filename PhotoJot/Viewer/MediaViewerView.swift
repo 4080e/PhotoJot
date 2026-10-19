@@ -64,6 +64,11 @@ struct MediaViewerView: View {
                             .disabled(model.image == nil || model.showsLoading || model.isClosing || closing ||
                                       model.activeItem?.id != session.currentItem.id ||
                                       model.photo.zoom.pinching || dismissProgress > 0)
+                    } else if session.currentItem.mediaType == "video" {
+                        Button("右に90°回転", systemImage: "rotate.right") { model.rotateVideoRight() }
+                            .labelStyle(.iconOnly)
+                            .disabled(model.player == nil || model.showsLoading || model.isClosing || closing ||
+                                      model.isRotatingVideo || model.activeItem?.id != session.currentItem.id || dismissProgress > 0)
                     }
                 }
             }
@@ -88,6 +93,14 @@ struct MediaViewerView: View {
             Text(model.rotationError ?? "")
         }
         .task { session.begin() }
+        .alert("動画の回転", isPresented: Binding(
+            get: { model.videoRotationError != nil },
+            set: { if !$0 { model.videoRotationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { model.videoRotationError = nil }
+        } message: {
+            Text(model.videoRotationError ?? "")
+        }
         .onDisappear {
             session.close()
             model.cancelAutomaticResume()

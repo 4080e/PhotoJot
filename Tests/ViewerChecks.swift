@@ -215,8 +215,14 @@ actor ViewerReadProbe {
         // Mixed pages share a single loader; each settled video autoplays, then drains on departure.
         let mixedPhoto = ViewerReadProbe(jpeg)
         let mixedVideo = ViewerReadProbe(movie)
+        let rotationSaveGate = ViewerReadProbe(Data(), hold: true)
         var mixedOpens: [UUID] = []
-        let mixed = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) }, open: { target in
+        let mixed = MediaViewerController(resolve: { try await repo.thumbnailTarget(id: $0, libraryID: $1) },
+            loadRotation: { try await repo.rotationQuarterTurns(id: $0, libraryID: $1) },
+            saveRotation: { value, id, libraryID in
+                _ = try await rotationSaveGate.read(0, 0)
+                try await repo.saveRotationQuarterTurns(value, id: id, libraryID: libraryID)
+            }, open: { target in
             mixedOpens.append(target.key.mediaEntryID)
             return target.fileExtension == "mov" ? mixedVideo.stream : mixedPhoto.stream
         })
@@ -227,18 +233,80 @@ actor ViewerReadProbe {
         mixed.select(item: video, viewport: viewport)
         await wait { mixed.player?.rate == 1 }
         check(mixed.activeItem == video && mixed.image == nil && mixed.photo.zoom.pagingEnabled)
+        let rotationPlayer = mixed.player!
+        let rotationItem = rotationPlayer.currentItem!
+        rotationPlayer.pause()
+        // Wait for a definite paused position instead of sampling the autoplay transition.
+        _ = await rotationPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+        let rotationTime = rotationPlayer.currentTime()
+        for angle in [1, 2, 3, 0, 1] {
+            mixed.rotateVideoRight()
+            await wait { !mixed.isRotatingVideo }
+            check(mixed.videoRotationError == nil && mixed.videoQuarterTurns == angle)
+            check(mixed.player === rotationPlayer && rotationPlayer.currentItem === rotationItem)
+            check(rotationPlayer.rate == 0 && rotationPlayer.currentTime() == rotationTime)
+            check((rotationItem.videoComposition == nil) == (angle == 0))
+        }
+        await wait { await rotationSaveGate.waiting }
         mixed.scenePhaseChanged(.background); mixed.scenePhaseChanged(.active)
+        check(mixed.isClosing)
+        await rotationSaveGate.release()
         await wait { !mixed.isClosing && mixed.player?.rate == 1 }
         check(mixed.activeItem == video && mixedOpens == [photo.id, video.id, video.id])
+        check(mixed.videoQuarterTurns == 1 && mixed.player?.currentItem?.videoComposition != nil)
+        check(try await repo.rotationQuarterTurns(id: video.id, libraryID: video.libraryID) == 1)
+        mixed.rotateVideoRight()
+        // Leaving while preparation is pending must never apply to the next page.
         mixed.select(item: photo, viewport: viewport)
         await wait { mixed.image != nil }
         check(mixed.player == nil && mixed.activeItem == photo)
+        check(mixed.videoQuarterTurns == 0 && !mixed.isRotatingVideo)
         check(await mixedVideo.closes == 2)
         mixed.photo.zoom.scale = 2
         mixed.setEditing(true)
         await wait { !mixed.isClosing }
         check(mixed.image == nil && mixed.photo.zoom.scale == 1)
         await mixed.stop()
+
+        // A new repository/controller restores persisted video rotation before exposing its player.
+        let reopenedRepo = try MediaRepository(url: root.appendingPathComponent("index.store"))
+        let persisted = MediaViewerController(resolve: { try await reopenedRepo.thumbnailTarget(id: $0, libraryID: $1) },
+            loadRotation: { try await reopenedRepo.rotationQuarterTurns(id: $0, libraryID: $1) },
+            saveRotation: { try await reopenedRepo.saveRotationQuarterTurns($0, id: $1, libraryID: $2) },
+            open: { target in target.fileExtension == "mov" ? mixedVideo.stream : mixedPhoto.stream })
+        persisted.start(item: video, viewport: viewport)
+        await wait { persisted.player != nil }
+        check(persisted.videoQuarterTurns == 1 && persisted.player?.currentItem?.videoComposition != nil)
+        for angle in [2, 3, 0] {
+            await wait { persisted.player?.currentItem?.status == .readyToPlay && !persisted.showsLoading }
+            persisted.rotateVideoRight()
+            await wait { !persisted.isRotatingVideo }
+            check(persisted.videoQuarterTurns == angle && persisted.videoRotationError == nil)
+        }
+        await persisted.stop()
+        check(try await reopenedRepo.rotationQuarterTurns(id: video.id, libraryID: video.libraryID) == 0)
+        persisted.start(item: video, viewport: viewport)
+        await wait { persisted.player?.rate == 1 }
+        check(persisted.videoQuarterTurns == 0 && persisted.player?.currentItem?.videoComposition == nil)
+        persisted.rotateVideoRight()
+        await wait { !persisted.isRotatingVideo }
+        persisted.select(item: photo, viewport: viewport)
+        await wait { persisted.image != nil }
+        check(persisted.photo.zoom.quarterTurns == 0)
+        persisted.rotatePhotoRight(); persisted.rotatePhotoRight()
+        await persisted.stop()
+        check(try await reopenedRepo.rotationQuarterTurns(id: photo.id, libraryID: photo.libraryID) == 2)
+        check(try await reopenedRepo.rotationQuarterTurns(id: video.id, libraryID: video.libraryID) == 1)
+        let refresh = try await reopenedRepo.begin(settings: settings)
+        try await reopenedRepo.ingest([.init(path: "a.jpg", size: Int64(jpeg.count), creation: date, modified: date),
+                                      .init(path: "b.mov", size: Int64(movie.count), creation: date, modified: date)],
+                                     ticket: refresh, progress: .init())
+        _ = try await reopenedRepo.finish(refresh, progress: .init(), completed: true)
+        persisted.start(item: video, viewport: viewport)
+        await wait { persisted.player != nil }
+        check(persisted.videoQuarterTurns == 1 && persisted.player?.currentItem?.videoComposition != nil)
+        await persisted.stop()
+        print("PASS: persisted video rotation, save drain, reopen, zero reset, photo isolation and library refresh")
 
         // Closing during selection cleanup drops the pending page permanently.
         let closeSelectionProbe = ViewerReadProbe(jpeg, hold: true)
