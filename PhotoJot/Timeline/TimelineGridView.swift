@@ -350,8 +350,13 @@ final class TimelineCollectionView: UICollectionView {
     }
 
     override func layoutSubviews() {
-        invalidateMetricsIfNeeded()
+        let geometryChanged = invalidateMetricsIfNeeded()
         super.layoutSubviews()
+        // UIKitのbounds変更処理後にも再計算し、変更前のセルサイズが残るのを防ぐ。
+        if geometryChanged {
+            collectionViewLayout.invalidateLayout()
+            super.layoutSubviews()
+        }
         // super内でsafe area由来のadjustedContentInsetが更新された場合も最新値へ収束させる。
         if invalidateMetricsIfNeeded() { super.layoutSubviews() }
         afterLayout?(self)

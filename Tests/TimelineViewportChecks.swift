@@ -70,9 +70,14 @@ struct TimelineThumbnailCell: View {
         view.autoresizingMask = []
         view.contentInsetAdjustmentBehavior = .never
         func verifyGrid(_ label: String) {
+            // 幅・inset変更後、同期テスト内でlayoutを確実に実行する。
+            view.setNeedsLayout()
             view.layoutIfNeeded()
             let inset = view.adjustedContentInset
             let available = view.bounds.width - inset.left - inset.right - layout.sectionInset.left - layout.sectionInset.right
+            // layout属性はコンテンツ座標。contentInsetは有効幅からのみ差し引く。
+            let leading = layout.sectionInset.left
+            let trailing = leading + available
             let spacing = layout.minimumInteritemSpacing
             let columns = Int(floor((available + spacing) / (88 + spacing)))
             let side = floor((available - CGFloat(columns - 1) * spacing) / CGFloat(columns))
@@ -81,14 +86,14 @@ struct TimelineThumbnailCell: View {
             precondition(firstRow.count == columns, "\(label): expected \(columns) columns, got \(firstRow.count)")
             for (index, frame) in frames.enumerated() {
                 precondition(abs(frame.width - side) < 0.5 && abs(frame.height - side) < 0.5, "\(label): stale cell size \(frame), expected \(side)")
-                precondition(frame.minX >= inset.left + layout.sectionInset.left - 0.5 && frame.maxX <= view.bounds.width - inset.right - layout.sectionInset.right + 0.5, "\(label): cell outside horizontal margins")
+                precondition(frame.minX >= leading - 0.5 && frame.maxX <= trailing + 0.5, "\(label): cell outside horizontal margins")
                 for other in frames.dropFirst(index + 1) {
                     precondition(!frame.intersects(other), "\(label): overlapping cells")
                 }
             }
             // floorによる端数以外の空白が行末やセル間に残っていないこと。
-            precondition(abs(firstRow[0].minX - inset.left - layout.sectionInset.left) < 1, "\(label): leading gap")
-            precondition(view.bounds.width - inset.right - layout.sectionInset.right - firstRow.last!.maxX < CGFloat(columns) + 1, "\(label): trailing gap")
+            precondition(abs(firstRow[0].minX - leading) < 1, "\(label): leading gap")
+            precondition(trailing - firstRow.last!.maxX < CGFloat(columns) + 1, "\(label): trailing gap")
             for pair in zip(firstRow, firstRow.dropFirst()) {
                 let gap = pair.1.minX - pair.0.maxX
                 precondition(gap >= spacing - 0.5 && gap < spacing + 2, "\(label): unexpected gap \(gap)")
@@ -196,7 +201,11 @@ struct TimelineThumbnailCell: View {
             await model.returnFromViewer(to: target)
             coordinator.update(value(returnSections, 6, returnJump), in: view)
             if offset == expected {
-                precondition(view.contentOffset == beforeReturn, "return \(label): visible item moved")
+                // UIKitの画素境界への丸めだけを許容する（3x画面では約0.167pt）。
+                let tolerance = 0.5 / view.traitCollection.displayScale + 0.000001
+                precondition(abs(view.contentOffset.x - beforeReturn.x) <= tolerance
+                             && abs(view.contentOffset.y - beforeReturn.y) <= tolerance,
+                             "return \(label): visible item moved")
             } else {
                 precondition(abs(view.contentOffset.y - expected) < 1, "return \(label): incorrect nearest edge")
             }
