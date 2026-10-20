@@ -13,6 +13,7 @@ nonisolated struct TimelineItem: Sendable, Identifiable, Equatable {
     // parser非対応と「内部日時なし」を区別できるよう、既存状態をそのまま渡す。
     let metadataState: String?
     let metadataIsCurrent: Bool
+    var rotationQuarterTurns: Int = 0
 }
 
 nonisolated struct TimelineCursor: Sendable {
@@ -81,6 +82,10 @@ actor TimelineRepository {
         try await store.timelinePage(libraryID: libraryID, after: cursor, newer: true)
     }
 
+    func rotations(libraryID: UUID, ids: [UUID]) async throws -> [UUID: Int] {
+        try await store.timelineRotations(libraryID: libraryID, ids: ids)
+    }
+
     func months(libraryID: UUID) async throws -> [TimelineMonth] {
         var result: [TimelineMonth] = []
         var before = "2"
@@ -112,6 +117,24 @@ actor TimelineRepository {
 }
 
 extension MediaRepository {
+    func timelineRotations(libraryID: UUID, ids: [UUID]) throws -> [UUID: Int] {
+        try Task.checkCancellation()
+        let context = context()
+        var result: [UUID: Int] = [:]
+        // 読み込み済み項目だけをローカル取得。長いtimelineでもIN条件を小さく保つ。
+        for start in stride(from: 0, to: ids.count, by: Self.batchSize) {
+            try Task.checkCancellation()
+            let batch = Array(ids[start..<min(start + Self.batchSize, ids.count)])
+            let rows = try context.fetch(FetchDescriptor<MediaEntry>(predicate: #Predicate {
+                $0.libraryID == libraryID && batch.contains($0.id)
+            }))
+            for entry in rows {
+                result[entry.id] = ((entry.rotationQuarterTurns ?? 0) % 4 + 4) % 4
+            }
+        }
+        return result
+    }
+
     private func timelineLibrary(_ id: UUID, context: ModelContext) throws -> Library {
         guard let value = try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.id == id })).first else {
             throw TimelineError.noLibrary
@@ -141,7 +164,8 @@ extension MediaRepository {
         return TimelineItem(id: entry.id, libraryID: entry.libraryID, relativePath: entry.relativePath,
                             mediaType: entry.mediaType, fileExtension: entry.fileExtension, generation: entry.generation,
                             date: TimelineDates.resolve(entry), sortKey: entry.timelineSortKey,
-                            metadataState: entry.metadataState, metadataIsCurrent: TimelineDates.hasCurrentMetadata(entry))
+                            metadataState: entry.metadataState, metadataIsCurrent: TimelineDates.hasCurrentMetadata(entry),
+                            rotationQuarterTurns: ((entry.rotationQuarterTurns ?? 0) % 4 + 4) % 4)
     }
 
     private func unpreparedTimeline(_ libraryID: UUID) -> FetchDescriptor<MediaEntry> {
@@ -269,7 +293,8 @@ extension MediaRepository {
             TimelineItem(id: entry.id, libraryID: entry.libraryID, relativePath: entry.relativePath,
                          mediaType: entry.mediaType, fileExtension: entry.fileExtension, generation: entry.generation,
                          date: TimelineDates.resolve(entry), sortKey: entry.timelineSortKey,
-                         metadataState: entry.metadataState, metadataIsCurrent: TimelineDates.hasCurrentMetadata(entry))
+                         metadataState: entry.metadataState, metadataIsCurrent: TimelineDates.hasCurrentMetadata(entry),
+                            rotationQuarterTurns: ((entry.rotationQuarterTurns ?? 0) % 4 + 4) % 4)
         }
         if newer { items.reverse() }
         let boundary = newer ? items.first : items.last

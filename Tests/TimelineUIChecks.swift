@@ -186,6 +186,35 @@ private actor PageFeed {
         await local.loadMoreIfNeeded(visibleID: local.blocks.last!.items.last!.id)
         check(local.loadedCount == 202 && !local.hasMore, "real final page excludes missing")
         check(!local.blocks.flatMap(\.items).contains { $0.relativePath == files.last!.path }, "missing entry absent")
+        // 保存済みの写真・動画を一度の復帰で更新。ネットワーク実装なしの実DB検証。
+        let originalItems = local.blocks.flatMap(\.items)
+        let photo = originalItems.first { $0.mediaType == "photo" }!
+        let video = originalItems.first { $0.mediaType == "video" }!
+        let display = local.displayGeneration
+        for angle in [1, 2, 3, 0] {
+            let version = local.contentVersion
+            try await repository.saveRotationQuarterTurns(angle, id: photo.id, libraryID: scan.libraryID)
+            try await repository.saveRotationQuarterTurns(angle, id: video.id, libraryID: scan.libraryID)
+            await local.returnFromViewer(to: photo)
+            let updated = local.blocks.flatMap(\.items)
+            check(updated.filter { $0.id == photo.id || $0.id == video.id }.allSatisfy { $0.rotationQuarterTurns == angle }, "both saved rotations on return")
+            check(updated.filter { $0.id != photo.id && $0.id != video.id } == originalItems.filter { $0.id != photo.id && $0.id != video.id }, "unrotated items unchanged")
+            check(updated.map(\.id) == originalItems.map(\.id) && local.displayGeneration == display, "rotation retains order and jump identity")
+            check(local.contentVersion == version + 1 && local.scrollRequest?.mediaID == photo.id, "single content update and existing return destination")
+            await local.returnFromViewer(to: video)
+            check(local.contentVersion == version + 1, "unchanged rotations do not reconfigure")
+            let fresh = try await timeline.page(libraryID: scan.libraryID)
+            for entry in fresh.items where entry.id == photo.id || entry.id == video.id {
+                check(entry.rotationQuarterTurns == angle, "new page retains saved rotation")
+            }
+        }
+        do {
+            try await repository.saveRotationQuarterTurns(4, id: photo.id, libraryID: scan.libraryID)
+            fatalError("invalid rotation saved")
+        } catch IndexFailure.invalidState { }
+        let unchangedVersion = local.contentVersion
+        await local.returnFromViewer(to: photo)
+        check(local.contentVersion == unchangedVersion && local.blocks.flatMap(\.items).allSatisfy { $0.rotationQuarterTurns == 0 }, "failed save does not affect timeline")
         let after = try await timeline.page(libraryID: scan.libraryID)
         check(before.revision == after.revision, "opening prepared timeline does not rebuild keys")
         check(try await repository.selectMetadata(settings: settings).count == 0, "opening does not requeue metadata")

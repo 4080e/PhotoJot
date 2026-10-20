@@ -40,6 +40,9 @@ struct TimelineThumbnailCell: View {
                 GeometryReader { geometry in
                     Image(decorative: image, scale: 1).resizable().scaledToFill()
                         .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                        // 正方形の画像だけを回す。元画像の向きは生成時に適用済み。
+                        .rotationEffect(.degrees(Double(item.rotationQuarterTurns) * 90))
+                        .clipped()
                 }
             } else {
                 Image(systemName: isVideo ? "video.fill" : "photo").font(.title2).foregroundStyle(.secondary)

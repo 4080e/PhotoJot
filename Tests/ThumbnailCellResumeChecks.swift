@@ -6,10 +6,12 @@ struct TimelineItem {
     var libraryID = UUID()
     var generation = UUID()
     var mediaType = "photo"
+    var rotationQuarterTurns = 0
 }
 @MainActor @Observable final class ThumbnailSession {
     var revision = 0
     @ObservationIgnored var cached: CGImage?
+    @ObservationIgnored var requests = 0
     @ObservationIgnored var suspended = true
     @ObservationIgnored var result: ThumbnailKey?
     func cachedImage(for key: ThumbnailKey) -> CGImage? { key == result ? cached : nil }
@@ -18,6 +20,7 @@ struct TimelineItem {
                      specificationVersion: "test", pixelSize: 300)
     }
     func imageKey(id: UUID, libraryID: UUID) async throws -> ThumbnailKey? {
+        requests += 1
         while suspended { try Task.checkCancellation(); await Task.yield() }
         try Task.checkCancellation()
         return result
@@ -75,6 +78,51 @@ struct TimelineItem {
         precondition(isRed(), "visible image survives cache loss and foreground revalidation")
         session.cached = red; mount(); await settle()
         precondition(isRed(), "recreated cell uses cache without repository wait")
+        let quadrants = UIGraphicsImageRenderer(size: CGSize(width: 200, height: 100)).image { context in
+            for (index, color) in [UIColor.red, .green, .blue, .yellow].enumerated() {
+                color.setFill()
+                let rects = [CGRect(x: 0, y: 0, width: 100, height: 50), CGRect(x: 100, y: 0, width: 100, height: 50),
+                             CGRect(x: 100, y: 50, width: 100, height: 50), CGRect(x: 0, y: 50, width: 100, height: 50)]
+                context.fill(rects[index])
+            }
+        }.cgImage!
+        func samples() -> [[UInt8]] {
+            let view = host!.view!
+            let image = UIGraphicsImageRenderer(size: view.bounds.size).image { _ in
+                view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
+            }.cgImage!
+            return [CGPoint(x: 0.25, y: 0.25), CGPoint(x: 0.75, y: 0.25),
+                    CGPoint(x: 0.75, y: 0.75), CGPoint(x: 0.25, y: 0.75)].map { point in
+                let crop = image.cropping(to: CGRect(x: CGFloat(image.width) * point.x, y: CGFloat(image.height) * point.y, width: 1, height: 1))!
+                var pixel = [UInt8](repeating: 0, count: 4)
+                let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                return Array(pixel.prefix(3))
+            }
+        }
+        session.cached = quadrants
+        for media in ["photo", "video"] {
+            item.mediaType = media; item.rotationQuarterTurns = 0
+            mount(); await settle()
+            let baseline = samples()
+            let requests = session.requests
+            for angle in [1, 2, 3, 0] {
+                item.rotationQuarterTurns = angle
+                host!.rootView = TimelineThumbnailCell(item: item, session: session)
+                await settle()
+                let actual = samples()
+                for index in 0..<4 {
+                    precondition(actual[index] == baseline[(index - angle + 4) % 4], "clockwise quadrant rotation for \(media) at \(angle)")
+                }
+                precondition(session.requests == requests, "rotation must not restart image requests")
+                precondition(host!.view.frame.size == CGSize(width: 100, height: 100), "cell frame unchanged")
+            }
+            item.rotationQuarterTurns = 3; mount(); await settle()
+            precondition(samples()[0] == baseline[1], "recreated cell retains rotation")
+        }
+        item.mediaType = "photo"; item.rotationQuarterTurns = 0
+        session.cached = red; mount(); await settle()
         item.generation = UUID()
         host!.rootView = TimelineThumbnailCell(item: item, session: session)
         await settle()

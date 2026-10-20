@@ -13,13 +13,16 @@ nonisolated struct TimelinePageSource: Sendable {
 
     var anchorPage: @Sendable (UUID, TimelineItem) async throws -> TimelinePage = { _, _ in throw TimelineError.needsPreparation }
 
+    var rotations: @Sendable (UUID, [UUID]) async throws -> [UUID: Int] = { _, _ in [:] }
+
     static func local(repository: TimelineRepository, settings: SMBConnectionSettings) -> Self {
         Self(prepare: { try await repository.prepare(settings: settings) },
              page: { try await repository.page(libraryID: $0, after: $1) },
              months: { try await repository.months(libraryID: $0) },
              monthPage: { try await repository.page(libraryID: $0, startingAt: $1) },
              newerPage: { try await repository.newerPage(libraryID: $0, before: $1) },
-             anchorPage: { try await repository.page(libraryID: $0, around: $1) })
+             anchorPage: { try await repository.page(libraryID: $0, around: $1) },
+             rotations: { try await repository.rotations(libraryID: $0, ids: $1) })
     }
 
 
@@ -32,6 +35,15 @@ nonisolated struct TimelinePageSource: Sendable {
     private(set) var items: [TimelineItem]
     init(first: TimelineItem) { id = first.id; group = first.date.groupKey; items = [first] }
     func append(_ item: TimelineItem) { items.append(item) }
+    func applyRotations(_ values: [UUID: Int]) -> Bool {
+        var changed = false
+        for index in items.indices {
+            guard let value = values[items[index].id], items[index].rotationQuarterTurns != value else { continue }
+            items[index].rotationQuarterTurns = value
+            changed = true
+        }
+        return changed
+    }
     func prepend(_ values: [TimelineItem]) { items.insert(contentsOf: values, at: 0) }
 }
 
@@ -76,12 +88,23 @@ struct TimelineScrollRequest: Equatable {
     func returnFromViewer(to item: TimelineItem) async {
         while isLoading { await withCheckedContinuation { idleWaiters.append($0) } }
         guard !Task.isCancelled, item.libraryID == libraryID else { return }
+        isLoading = true
+        defer { isLoading = false }
         if blocks.contains(where: { $0.items.contains(where: { $0.id == item.id }) }) {
+            do {
+                let values = try await source.rotations(item.libraryID, blocks.flatMap { $0.items.map(\.id) })
+                try Task.checkCancellation()
+                var changed = false
+                for block in blocks {
+                    if block.applyRotations(values) { changed = true }
+                }
+                if changed { contentVersion += 1 }
+            } catch is CancellationError { return }
+            catch { errorMessage = error.localizedDescription }
+            // 従来の復帰位置指定を維持。画像取得のrevisionは変更しない。
             scrollRequest = TimelineScrollRequest(mediaID: item.id)
             return
         }
-        isLoading = true
-        defer { isLoading = false }
         do {
             let page = try await source.anchorPage(item.libraryID, item)
             try Task.checkCancellation()
