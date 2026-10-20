@@ -406,6 +406,7 @@ private actor PageFeed {
         await returning.loadInitial()
         await returning.returnFromViewer(to: first[80])
         check(await returnFeed.requestCount() == 1 && returning.scrollRequest?.mediaID == first[80].id, "loaded viewer destination requires no fetch")
+        check(returning.scrollRequest?.keepVisiblePosition == true, "loaded return preserves visible position")
         let consumed = returning.scrollRequest!.id
         returning.consumeScrollRequest(consumed)
         check(returning.scrollRequest == nil, "one-shot consumed")
@@ -419,6 +420,7 @@ private actor PageFeed {
         check(await returnFeed.requestCount() == 2 && returning.scrollRequest?.mediaID == second[0].id, "completed page supplies destination without extra query")
         await returning.returnFromViewer(to: third[0])
         check(await returnFeed.requestCount() == 3 && returning.blocks.first?.items.first?.id == third[0].id, "unloaded viewer destination uses anchor page")
+        check(returning.scrollRequest?.keepVisiblePosition == false, "unloaded return retains centered positioning")
         check(returning.hasNewer && returning.isViewerWindow, "unknown-date return supports newer and latest action")
         returning.consumeScrollRequest(consumed)
         check(returning.scrollRequest?.mediaID == third[0].id, "old acknowledgement cannot consume newer request")

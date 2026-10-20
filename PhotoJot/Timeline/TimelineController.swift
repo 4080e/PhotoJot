@@ -50,6 +50,7 @@ nonisolated struct TimelinePageSource: Sendable {
 struct TimelineScrollRequest: Equatable {
     let id = UUID()
     let mediaID: UUID
+    var keepVisiblePosition = true
 }
 
 @MainActor @Observable final class TimelineController {
@@ -101,7 +102,7 @@ struct TimelineScrollRequest: Equatable {
                 if changed { contentVersion += 1 }
             } catch is CancellationError { return }
             catch { errorMessage = error.localizedDescription }
-            // 従来の復帰位置指定を維持。画像取得のrevisionは変更しない。
+            // 可視範囲内なら位置を維持する。画像取得のrevisionは変更しない。
             scrollRequest = TimelineScrollRequest(mediaID: item.id)
             return
         }
@@ -114,7 +115,7 @@ struct TimelineScrollRequest: Equatable {
             errorMessage = nil
             append(page)
             configureNewer(page, preservingViewport: true)
-            scrollRequest = TimelineScrollRequest(mediaID: item.id)
+            scrollRequest = TimelineScrollRequest(mediaID: item.id, keepVisiblePosition: false)
         } catch is CancellationError { }
         catch { errorMessage = error.localizedDescription }
     }

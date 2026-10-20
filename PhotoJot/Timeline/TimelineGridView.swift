@@ -218,7 +218,25 @@ struct TimelineGridView: UIViewRepresentable {
             rotationAnchor = nil
             applying = true
             view.layoutIfNeeded()
-            view.scrollToItem(at: path, at: .centeredVertically, animated: false)
+            if request.keepVisiblePosition {
+                if let frame = view.layoutAttributesForItem(at: path)?.frame {
+                    let visible = view.bounds.inset(by: view.adjustedContentInset)
+                    let intersection = visible.intersection(frame)
+                    // 半分以上見えていれば、部分表示でも現在位置をそのまま保つ。
+                    if intersection.isNull || intersection.height < frame.height / 2 {
+                        let delta = frame.minY < visible.minY
+                            ? frame.minY - visible.minY : max(0, frame.maxY - visible.maxY)
+                        let minimum = -view.adjustedContentInset.top
+                        let maximum = max(minimum, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+                        let offset = min(max(view.contentOffset.y + delta, minimum), maximum)
+                        if offset != view.contentOffset.y {
+                            view.setContentOffset(CGPoint(x: view.contentOffset.x, y: offset), animated: false)
+                        }
+                    }
+                }
+            } else {
+                view.scrollToItem(at: path, at: .centeredVertically, animated: false)
+            }
             view.layoutIfNeeded()
             applying = false
             lastOffset = view.contentOffset.y

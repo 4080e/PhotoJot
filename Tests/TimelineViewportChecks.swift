@@ -41,7 +41,7 @@ struct TimelineThumbnailCell: View {
             range.map { number in
                 let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", number))!
                 let date = TimelineDate(calendarDateTime: "2023-12-31T12:00:00", recordedOffset: nil, kind: .provisional, source: nil, quality: nil)
-                return TimelineItem(id: id, libraryID: library, relativePath: "\(number).jpg", mediaType: "photo", fileExtension: "jpg", generation: id, date: date, sortKey: date.sortKey(id: id), metadataState: nil, metadataIsCurrent: false)
+                return TimelineItem(id: id, libraryID: library, relativePath: "\(number).\(number % 2 == 0 ? "jpg" : "mov")", mediaType: number % 2 == 0 ? "photo" : "video", fileExtension: number % 2 == 0 ? "jpg" : "mov", generation: id, date: date, sortKey: date.sortKey(id: id), metadataState: nil, metadataIsCurrent: false)
             }
         }
         let original = items(0..<400), newer = items(1000..<1200), newest = items(1200..<1400)
@@ -185,6 +185,49 @@ struct TimelineThumbnailCell: View {
         precondition(view.indexPathsForVisibleItems.contains(returnedPath), "returned item visible")
         await Task.yield()
         precondition(model.scrollRequest == nil && model.displayedMonth == original[180].date.month, "return consumed and month follows viewport")
+        // 復帰先の実測frameとsafe areaを使い、上下端それぞれの部分表示を確認。
+        let target = original[180]
+        let targetFrame = view.layoutAttributesForItem(at: returnedPath)!.frame
+        func checkReturn(_ offset: CGFloat, expected: CGFloat, label: String) async {
+            coordinator.scrollViewWillBeginDragging(view)
+            view.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+            view.layoutIfNeeded()
+            let beforeReturn = view.contentOffset
+            await model.returnFromViewer(to: target)
+            coordinator.update(value(returnSections, 6, returnJump), in: view)
+            if offset == expected {
+                precondition(view.contentOffset == beforeReturn, "return \(label): visible item moved")
+            } else {
+                precondition(abs(view.contentOffset.y - expected) < 1, "return \(label): incorrect nearest edge")
+            }
+            await Task.yield()
+        }
+        let topAligned = targetFrame.minY - view.adjustedContentInset.top
+        let bottomAligned = targetFrame.maxY - view.bounds.height + view.adjustedContentInset.bottom
+        await checkReturn(topAligned, expected: topAligned, label: "fully visible")
+        for fraction in [0.25, 0.5, 0.75] {
+            let upper = topAligned + targetFrame.height * fraction
+            let lower = bottomAligned - targetFrame.height * fraction
+            await checkReturn(upper, expected: fraction <= 0.5 ? upper : topAligned, label: "upper partial \(fraction)")
+            await checkReturn(lower, expected: fraction <= 0.5 ? lower : bottomAligned, label: "lower partial \(fraction)")
+        }
+        await checkReturn(topAligned + targetFrame.height * 2, expected: topAligned, label: "offscreen above minimal move")
+        await checkReturn(bottomAligned - targetFrame.height * 2, expected: bottomAligned, label: "offscreen below minimal move")
+        // 左右ページ移動後は、最初のセルではなく最後に表示した動画へ復帰。
+        var video = original[185]
+        video.rotationQuarterTurns = 1
+        var rotatedItems = original
+        rotatedItems[185] = video
+        await model.returnFromViewer(to: video)
+        coordinator.update(value([.init(id: oldSection, title: "return", items: rotatedItems)], 7, returnJump), in: view)
+        let videoPath = coordinator.dataSource.indexPath(for: video.id)!
+        precondition(view.indexPathsForVisibleItems.contains(videoPath), "last paged media visible")
+        await Task.yield()
+        let rotatedOffset = view.contentOffset
+        await model.returnFromViewer(to: video)
+        coordinator.update(value(returnSections, 8, returnJump), in: view)
+        precondition(view.contentOffset == rotatedOffset, "rotation reconfiguration must not move visible destination")
+        await Task.yield()
         coordinator.scrollViewWillBeginDragging(view)
         view.setContentOffset(CGPoint(x: 0, y: view.contentOffset.y + 400), animated: false)
         let afterReturn = coordinator.anchor(in: view)!
@@ -228,6 +271,13 @@ struct TimelineThumbnailCell: View {
             precondition(abs(header.frame.minY - view.contentOffset.y - view.adjustedContentInset.top) < 1, "month day header aligns to top: \(count)")
             precondition(view.indexPathsForVisibleItems.contains(targetPath), "first media of day visible: \(count)")
             precondition(coordinator.dataSource.snapshot().numberOfItems == 201, "both sides installed together")
+            let monthOffset = view.contentOffset
+            await monthModel.returnFromViewer(to: target.first!)
+            var monthReturn = monthView
+            monthReturn.scrollRequest = monthModel.scrollRequest
+            coordinator.update(monthReturn, in: view)
+            precondition(view.contentOffset == monthOffset, "visible return after month jump must not move")
+            await Task.yield()
             let portraitFrame = view.frame
             for cycle in 1...3 {
                 view.frame.size = CGSize(width: 932, height: 350)
