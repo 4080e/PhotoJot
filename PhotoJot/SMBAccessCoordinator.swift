@@ -5,7 +5,29 @@ import SMBClient
 // 全SMB処理は同じ接続とFIFO枠を利用する。scanはフォルダ、metadataはファイルで譲る。
 actor SMBAccessCoordinator {
     private let gate = SMBOperationGate()
-    private var viewerReaders: [UUID: (FileReader, UInt64)] = [:]
+    private var viewerReaders: [UUID: (FileReader, UInt64, Generation)] = [:]
+    private final class Generation {
+        let id = UUID()
+        let client: SMBClient
+        var interrupted = false
+        var retryAllowed = true
+        init(_ client: SMBClient) { self.client = client }
+    }
+    private var generation: Generation?
+    private var activeOwner: (operation: UUID, generation: UUID)?
+
+    // The callback carries only its generation ID. Never wait for the gate to abort I/O.
+    private func connectionInterrupted(_ id: UUID, retryAllowed: Bool) {
+        guard let current = generation, current.id == id, !current.interrupted else { return }
+        current.interrupted = true
+        current.retryAllowed = retryAllowed
+        SMBRecoveryStatus.shared.began(id)
+        #if DEBUG
+        SMBDiagnostics.shared.event("waiting/failed: disconnect outside gate; waiting for operation drain", id: id)
+        #endif
+        current.client.session.disconnect()
+        if activeOwner?.generation != id { disconnect() }
+    }
     private var client: SMBClient?
     private var connectedSettings: SMBConnectionSettings?
     private var connectedPassword: String?
@@ -14,12 +36,23 @@ actor SMBAccessCoordinator {
     #endif
 
     private func disconnect() {
+        if let current = generation {
+            #if DEBUG
+            SMBDiagnostics.shared.end(current.id, outcome: "disconnect cleanup")
+            #endif
+            SMBRecoveryStatus.shared.ended(current.id)
+        }
+        generation = nil
         viewerReaders.removeAll()
         client?.session.disconnect(); client = nil
         connectedSettings = nil; connectedPassword = nil
     }
 
     func disconnectWhenAvailable() async {
+        #if DEBUG
+        let diagnostic = SMBDiagnostics.shared.begin("disconnect gate wait")
+        defer { SMBDiagnostics.shared.end(diagnostic) }
+        #endif
         // cleanupは呼び出し元Taskのcancelにも関係なく最後まで待つ。
         let cleanup = Task {
             do { try await gate.acquire() } catch { return }
@@ -30,30 +63,83 @@ actor SMBAccessCoordinator {
     }
 
     private func withClient<T: Sendable>(settings: SMBConnectionSettings, password: String,
-                                        operation: (SMBClient) async throws -> T) async throws -> T {
+                                        operationName: String = #function, operation: (SMBClient) async throws -> T) async throws -> T {
+        #if DEBUG
+        let diagnostic = SMBDiagnostics.shared.begin(operationName)
+        defer { SMBDiagnostics.shared.end(diagnostic) }
+        try await gate.acquire(operation: diagnostic)
+        #else
         try await gate.acquire()
+        #endif
+        var used: Generation?
+        let ownership = UUID()
+        defer { if activeOwner?.operation == ownership { activeOwner = nil } }
         do {
             try Task.checkCancellation()
+            if generation?.interrupted == true { disconnect() }
             if connectedSettings != settings || connectedPassword != password { disconnect() }
             if client == nil {
                 guard (1...65535).contains(settings.port) else { throw IndexFailure.invalidState }
                 let next = SMBClient(host: settings.host, port: settings.port)
+                let created = Generation(next)
+                generation = created; used = created
+                activeOwner = (ownership, created.id)
+                let connectionID = created.id
+                next.onDisconnected = { [weak self] error in
+                    let retryAllowed = !Self.isPermissionFailure(error)
+                    Task { await self?.connectionInterrupted(connectionID, retryAllowed: retryAllowed) }
+                }
+                #if DEBUG
+                SMBDiagnostics.shared.begin("connection", id: connectionID)
+                SMBDiagnostics.shared.event("connect waiting", id: connectionID)
+                #endif
                 client = next
                 try await next.session.connect(); try Task.checkCancellation()
+                guard !created.interrupted else { throw SMBRecoveryError.interrupted }
+                #if DEBUG
+                SMBDiagnostics.shared.event("connect returned; login waiting", id: connectionID)
+                #endif
                 try await next.login(username: settings.username, password: password,
                                      domain: settings.domain.isEmpty ? nil : settings.domain)
                 try Task.checkCancellation()
+                guard !created.interrupted else { throw SMBRecoveryError.interrupted }
+                #if DEBUG
+                SMBDiagnostics.shared.event("login returned; share waiting", id: connectionID)
+                #endif
                 try await next.connectShare(settings.share); try Task.checkCancellation()
+                guard !created.interrupted else { throw SMBRecoveryError.interrupted }
+                #if DEBUG
+                SMBDiagnostics.shared.event("share connected", id: connectionID)
+                #endif
                 connectedSettings = settings; connectedPassword = password
             }
+            used = generation
+            if let used { activeOwner = (ownership, used.id) }
+            guard let used, !used.interrupted else { throw SMBRecoveryError.interrupted }
+            #if DEBUG
+            let value = try await SMBDiagnostics.$operation.withValue(diagnostic) {
+                try await SMBDiagnostics.measure("SMB body", { try await operation(client!) })
+            }
+            #else
             let value = try await operation(client!)
+            #endif
             try Task.checkCancellation()
+            guard !used.interrupted else { throw SMBRecoveryError.interrupted }
             await gate.release()
             return value
         } catch {
-            disconnect()
+            #if DEBUG
+            SMBDiagnostics.shared.event(error is CancellationError ? "cancelled" : "error", id: diagnostic)
+            #endif
+            let recoverable = (used?.interrupted == true ? used?.retryAllowed == true : Self.isTransportFailure(error)) && !Self.isPermissionFailure(error)
+            // Only the owning generation may be cleared by this completion.
+            if let used, generation?.id == used.id { disconnect() }
             await gate.release()
             try Task.checkCancellation()
+            if recoverable { throw SMBRecoveryError.interrupted }
+            // An interruption detected through a permission-denied notification must not
+            // leak the retry marker emitted by the post-await generation check.
+            if error is SMBRecoveryError { throw AccessError(message: "接続を継続できませんでした。権限と接続設定を確認してください。") }
             throw error
         }
     }
@@ -67,6 +153,7 @@ actor SMBAccessCoordinator {
                 return entries.filter { $0.name != "." && $0.name != ".." }.count
             }
         } catch is CancellationError { throw CancellationError() }
+        catch is SMBRecoveryError { throw SMBRecoveryError.interrupted }
         catch { throw Self.failure(error, stage: "接続確認") }
     }
 
@@ -78,7 +165,7 @@ actor SMBAccessCoordinator {
             }
             let reader = client.fileReader(path: target.path)
             do {
-                let size = try await reader.fileSize
+                let size = try await reader.diagnosticFileSize
                 try Task.checkCancellation()
                 guard size == UInt64(target.fileSize) else { throw IndexFailure.invalidState }
                 let source = SMBThumbnailReader(reader: reader)
@@ -93,11 +180,11 @@ actor SMBAccessCoordinator {
                         try await source.read(offset: $0, count: $1)
                     }
                 }
-                try await reader.close()
+                try await closeIfUsable(reader, client: client)
                 try Task.checkCancellation()
                 return data
             } catch {
-                try? await reader.close()
+                try? await closeIfUsable(reader, client: client)
                 try Task.checkCancellation()
                 throw error
             }
@@ -112,41 +199,69 @@ actor SMBAccessCoordinator {
             guard target.fileSize > 0, !path.hasPrefix("/"), !path.split(separator: "/").contains("..") else { throw IndexFailure.invalidState }
             let file = client.fileReader(path: target.path)
             do {
-                let size = try await file.fileSize
+                let size = try await file.diagnosticFileSize
                 try Task.checkCancellation()
                 guard size == UInt64(target.fileSize) else { throw IndexFailure.invalidState }
                 let id = UUID()
-                viewerReaders[id] = (file, size)
+                guard let generation, !generation.interrupted else { throw SMBRecoveryError.interrupted }
+                viewerReaders[id] = (file, size, generation)
                 return id
-            } catch { try? await file.close(); throw error }
+            } catch { try? await closeIfUsable(file, client: client); throw error }
         }
     }
 
     func readViewer(_ id: UUID, offset: UInt64, count: Int) async throws -> Data {
+        #if DEBUG
+        let diagnostic = SMBDiagnostics.shared.begin("viewer read")
+        defer { SMBDiagnostics.shared.end(diagnostic) }
+        #endif
         try await gate.acquire()
+        let owner = viewerReaders[id]?.2
+        let ownership = UUID()
+        if let owner { activeOwner = (ownership, owner.id) }
+        defer { if activeOwner?.operation == ownership { activeOwner = nil } }
         do {
             try Task.checkCancellation()
-            guard let (reader, size) = viewerReaders[id], count > 0, count <= 1_048_576,
+            guard let owner, generation?.id == owner.id, !owner.interrupted else { throw SMBRecoveryError.interrupted }
+            guard let (reader, size, _) = viewerReaders[id], count > 0, count <= 1_048_576,
                   offset <= size, UInt64(count) <= size - offset else { throw IndexFailure.invalidState }
-            let data = try await reader.read(offset: offset, length: UInt32(count))
+            let data = try await reader.diagnosticRead(offset: offset, length: UInt32(count))
             try Task.checkCancellation()
+            guard !owner.interrupted else { throw SMBRecoveryError.interrupted }
             guard data.count == count else { throw IndexFailure.invalidState }
             await gate.release()
             return data
         } catch {
             // 失効handleは現在の別接続を切断しない。
-            if viewerReaders[id] != nil { disconnect() }
+            let recoverable = (owner?.interrupted == true ? owner?.retryAllowed == true : (error is SMBRecoveryError || Self.isTransportFailure(error))) && !Self.isPermissionFailure(error)
+            if let owner, generation?.id == owner.id { disconnect() }
             await gate.release()
             try Task.checkCancellation()
+            if recoverable { throw SMBRecoveryError.interrupted }
+            // An interruption detected through a permission-denied notification must not
+            // leak the retry marker emitted by the post-await generation check.
+            if error is SMBRecoveryError { throw AccessError(message: "接続を継続できませんでした。権限と接続設定を確認してください。") }
             throw error
         }
     }
 
     func closeViewer(_ id: UUID) async {
+        #if DEBUG
+        let diagnostic = SMBDiagnostics.shared.begin("viewer close wait")
+        defer { SMBDiagnostics.shared.end(diagnostic) }
+        #endif
         let cleanup = Task {
             do { try await gate.acquire() } catch { return }
-            if let (reader, _) = viewerReaders.removeValue(forKey: id) {
-                do { try await reader.close() } catch { disconnect() }
+            let ownership = UUID()
+            defer { if activeOwner?.operation == ownership { activeOwner = nil } }
+            if let (reader, _, owner) = viewerReaders.removeValue(forKey: id), generation?.id == owner.id {
+                activeOwner = (ownership, owner.id)
+                if owner.interrupted { disconnect() }
+                else {
+                    do { try await reader.diagnosticClose() }
+                    catch { if generation?.id == owner.id { disconnect() } }
+                    if owner.interrupted, generation?.id == owner.id { disconnect() }
+                }
             }
             await gate.release()
         }
@@ -168,6 +283,7 @@ actor SMBAccessCoordinator {
                 }
             }
             catch is CancellationError { throw CancellationError() }
+            catch is SMBRecoveryError { throw SMBRecoveryError.interrupted }
             catch {
                 try Task.checkCancellation()
                 throw Self.failure(error, stage: "フォルダの一覧取得")
@@ -229,6 +345,7 @@ actor SMBAccessCoordinator {
                         return result
                     }
                 } catch is CancellationError { throw CancellationError() }
+                catch is SMBRecoveryError { throw SMBRecoveryError.interrupted }
                 catch {
                     try Task.checkCancellation()
                     throw Self.failure(error, stage: "撮影日時の取得")
@@ -254,7 +371,7 @@ actor SMBAccessCoordinator {
         let file = client.fileReader(path: target.file.path)
         var outcome: MetadataOutcome
         do {
-            let size = try await file.fileSize
+            let size = try await file.diagnosticFileSize
             try Task.checkCancellation()
             if size != UInt64(target.file.size) {
                 outcome = MetadataCore.outcome(format: format,
@@ -266,21 +383,45 @@ actor SMBAccessCoordinator {
                                                        creation: target.file.creation, modified: target.file.modified)
             }
         } catch is CancellationError {
-            try? await file.close()
+            try? await closeIfUsable(file, client: client)
             throw CancellationError()
         } catch {
-            if Task.isCancelled { try? await file.close(); throw CancellationError() }
+            if Self.isPermissionFailure(error) { throw error }
+            if Task.isCancelled { try? await closeIfUsable(file, client: client); throw CancellationError() }
             outcome = MetadataCore.outcome(format: format,
                 evidence: .init(diagnostics: [.init(kind: .smb, message: "SMB open/read失敗")]), creation: nil, modified: nil)
         }
-        do { try await file.close() }
+        do { try await closeIfUsable(file, client: client) }
         catch is CancellationError { throw CancellationError() }
+        catch is SMBRecoveryError { throw SMBRecoveryError.interrupted }
         catch {
             outcome = MetadataCore.outcome(format: format,
                 evidence: .init(diagnostics: [.init(kind: .cleanup, message: "SMB close失敗")]), creation: nil, modified: nil)
         }
         try Task.checkCancellation()
         return outcome
+    }
+
+    private func closeIfUsable(_ reader: FileReader, client: SMBClient) async throws {
+        guard let owner = generation, owner.client === client, !owner.interrupted else { return }
+        try await reader.diagnosticClose()
+    }
+
+    private nonisolated static func isPermissionFailure(_ error: Error) -> Bool {
+        if let response = error as? ErrorResponse {
+            switch NTStatus(response.header.status) {
+            case .logonFailure, .accessDenied: return true
+            default: return false
+            }
+        }
+        if let error = error as? NWError, case .posix(let code) = error {
+            return code == .EACCES || code == .EPERM
+        }
+        return false
+    }
+    private nonisolated static func isTransportFailure(_ error: Error) -> Bool {
+        guard !isPermissionFailure(error) else { return false }
+        return error is NWError || error is ConnectionError
     }
 
     private nonisolated static func failure(_ error: Error, stage: String) -> AccessError {
@@ -326,6 +467,33 @@ nonisolated private final class SMBThumbnailReader: @unchecked Sendable {
     let reader: FileReader
     init(reader: FileReader) { self.reader = reader }
     func read(offset: UInt64, count: Int) async throws -> Data {
-        try await reader.read(offset: offset, length: UInt32(count))
+        try await reader.diagnosticRead(offset: offset, length: UInt32(count))
+    }
+}
+
+// No task, timeout or cancellation handler is introduced by these adapters.
+extension FileReader {
+    nonisolated var diagnosticFileSize: UInt64 {
+        get async throws {
+            #if DEBUG
+            return try await SMBDiagnostics.measure("file open/size") { try await self.fileSize }
+            #else
+            return try await fileSize
+            #endif
+        }
+    }
+    nonisolated func diagnosticRead(offset: UInt64, length: UInt32) async throws -> Data {
+        #if DEBUG
+        return try await SMBDiagnostics.measure("file read") { try await self.read(offset: offset, length: length) }
+        #else
+        return try await read(offset: offset, length: length)
+        #endif
+    }
+    nonisolated func diagnosticClose() async throws {
+        #if DEBUG
+        try await SMBDiagnostics.measure("file close") { try await self.close() }
+        #else
+        try await close()
+        #endif
     }
 }

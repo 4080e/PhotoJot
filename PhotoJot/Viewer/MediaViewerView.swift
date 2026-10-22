@@ -31,6 +31,7 @@ struct MediaViewerView: View {
                                     if animated { withAnimation(.easeOut(duration: 0.25)) { dismissProgress = value } }
                                     else { dismissProgress = value }
                                 }, dismissRequested: { close(animated: false) })
+                    .safeAreaInset(edge: .bottom) { SMBRecoveryBanner() }
                     .onChange(of: session.currentItem, initial: true) { _, item in
                         model.select(item: item, viewport: viewport)
                         model.preparePreview(for: item, thumbnails: thumbnails)

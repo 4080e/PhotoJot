@@ -23,6 +23,7 @@ struct ContentView: View {
                 settingsView
             }
         }
+        .safeAreaInset(edge: .bottom) { SMBRecoveryBanner() }
         .sheet(isPresented: $showingSettings, onDismiss: { connection.endEditing() }) {
             NavigationStack {
                 settingsView

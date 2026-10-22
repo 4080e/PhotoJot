@@ -113,7 +113,7 @@ struct TimelineView: View {
             if update.isRunning {
                 HStack {
                     ProgressView()
-                    Text(update.state == .cancelling ? "更新を中断中…" :
+                    Text(update.state == .cancelling ? "更新を中断中…" : update.recoveryMessage ??
                         (update.phase == .metadata ? metadataProgressText : "ライブラリを更新中…"))
                         .font(.footnote)
                     Spacer()
@@ -121,7 +121,7 @@ struct TimelineView: View {
             } else if update.state == .failed {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(model.blocks.isEmpty ? "ライブラリを更新できませんでした。" : "更新できませんでした。保存済みの内容を表示しています。")
-                    Text("右上の更新ボタンで再試行するか、接続設定を確認してください。")
+                    Text(update.errorMessage ?? "右上の更新ボタンで再試行するか、接続設定を確認してください。")
                         .foregroundStyle(.secondary)
                 }.font(.footnote).frame(maxWidth: .infinity, alignment: .leading).padding().background(.bar)
             }

@@ -12,13 +12,33 @@ nonisolated struct LibraryUpdateConnection: Sendable {
     enum State { case idle, running, cancelling, completed, cancelled, failed }
     enum Phase { case preparing, scanning, metadata }
 
-    private(set) var state = State.idle
-    private(set) var phase: Phase?
+    #if DEBUG
+    @ObservationIgnored private var diagnosticUpdate: UUID?
+    @ObservationIgnored private var diagnosticCancel: UUID?
+    #endif
+    private(set) var state = State.idle {
+        didSet {
+            #if DEBUG
+            SMBDiagnostics.shared.event("update state \(oldValue) -> \(state)", id: diagnosticUpdate)
+            #endif
+        }
+    }
+    private(set) var phase: Phase? {
+        didSet {
+            #if DEBUG
+            SMBDiagnostics.shared.event("update phase \(phase.map { String(describing: $0) } ?? "none")", id: diagnosticUpdate)
+            #endif
+        }
+    }
     private(set) var scanProgress = ScanProgress()
     private(set) var metadataProgress = MetadataProgress()
     private(set) var missingCount: Int?
     private(set) var errorMessage: String?
     private(set) var libraryName: String?
+    private(set) var executionID: UUID?
+    private(set) var recoveryAttempt = 0
+    private(set) var recoveryMessage: String?
+    @ObservationIgnored private let retryDelay: () async throws -> Void
     private(set) var restartRequested = false
     var isRunning: Bool { state == .running || state == .cancelling }
     private(set) var isCheckingConnection = false
@@ -40,7 +60,9 @@ nonisolated struct LibraryUpdateConnection: Sendable {
          scan: @escaping (LibraryUpdateConnection, @Sendable @escaping (ScanProgress) async -> Void) async throws -> Int,
          metadata: @escaping (LibraryUpdateConnection, @Sendable @escaping (MetadataProgress) async -> Void) async throws -> Void,
          prepareInitialUpdate: @escaping () async throws -> Bool = { false },
-         saveSuccess: @escaping (LibraryUpdateConnection) async throws -> Void = { _ in }) {
+         saveSuccess: @escaping (LibraryUpdateConnection) async throws -> Void = { _ in },
+         retryDelay: @escaping () async throws -> Void = { try await Task.sleep(nanoseconds: 1_000_000_000) }) {
+        self.retryDelay = retryDelay
         self.prepareInitialUpdate = prepareInitialUpdate
         self.saveSuccess = saveSuccess
         self.connection = connection
@@ -82,12 +104,24 @@ nonisolated struct LibraryUpdateConnection: Sendable {
 
     private func startUpdate(initialOnly: Bool) {
         guard task == nil else { return }
+        #if DEBUG
+        diagnosticUpdate = SMBDiagnostics.shared.begin("library update")
+        #endif
+        recoveryAttempt = 0; recoveryMessage = nil
         state = .running; phase = .preparing
         errorMessage = nil; missingCount = nil; libraryName = nil
         scanProgress = ScanProgress(); metadataProgress = MetadataProgress()
         task = Task { [self] in
             defer {
                 // Serviceの終了・切断・保存が戻るまでtaskを解放しない。
+                #if DEBUG
+                if let id = diagnosticCancel { SMBDiagnostics.shared.end(id, outcome: "cancel cleanup finished") }
+                diagnosticCancel = nil
+                if let id = diagnosticUpdate { SMBDiagnostics.shared.end(id, outcome: "update task finished") }
+                diagnosticUpdate = nil
+                #endif
+                executionID = nil
+                recoveryMessage = nil
                 task = nil
                 phase = nil
                 let restart = restartRequested
@@ -101,17 +135,43 @@ nonisolated struct LibraryUpdateConnection: Sendable {
                 try Task.checkCancellation()
                 let snapshot = try connection()
                 libraryName = snapshot.settings.share + (snapshot.settings.rootPath.isEmpty ? "" : "/" + snapshot.settings.rootPath)
-                phase = .scanning
-                missingCount = try await scan(snapshot) { [weak self] value in
-                    await self?.setScanProgress(value)
+                while true {
+                    let runID = UUID()
+                    executionID = runID
+                    scanProgress = ScanProgress(); metadataProgress = MetadataProgress(); missingCount = nil
+                    do {
+                        try Task.checkCancellation()
+                        phase = .scanning
+                        missingCount = try await scan(snapshot) { [weak self] value in
+                            await self?.setScanProgress(value, runID: runID)
+                        }
+                        try Task.checkCancellation()
+                        phase = .metadata
+                        try await metadata(snapshot) { [weak self] value in
+                            await self?.setMetadataProgress(value, runID: runID)
+                        }
+                        try Task.checkCancellation()
+                        try await saveSuccess(snapshot)
+                        recoveryMessage = nil
+                        break
+                    } catch is SMBRecoveryError {
+                        executionID = nil
+                        // scan has already persisted its incomplete ticket before returning here.
+                        try Task.checkCancellation()
+                        guard recoveryAttempt < 2, lastScenePhase != .background,
+                              !isEditingSettings, !isCheckingConnection else {
+                            throw UpdateRecoveryFailure.exhausted
+                        }
+                        recoveryAttempt += 1
+                        recoveryMessage = "接続を再確立して更新を再試行します（\(recoveryAttempt)/2）"
+                        phase = .preparing
+                        try await retryDelay()
+                        try Task.checkCancellation()
+                        guard !isEditingSettings, !isCheckingConnection, lastScenePhase != .background else {
+                            throw UpdateRecoveryFailure.exhausted
+                        }
+                    }
                 }
-                try Task.checkCancellation()
-                phase = .metadata
-                try await metadata(snapshot) { [weak self] value in
-                    await self?.setMetadataProgress(value)
-                }
-                try Task.checkCancellation()
-                try await saveSuccess(snapshot)
                 state = .completed
             } catch is CancellationError {
                 state = .cancelled
@@ -127,6 +187,10 @@ nonisolated struct LibraryUpdateConnection: Sendable {
         restartRequested = false
         deferredUpdateRequested = false
         guard task != nil else { return }
+        #if DEBUG
+        if diagnosticCancel == nil { diagnosticCancel = SMBDiagnostics.shared.begin("update cancellation wait") }
+        SMBDiagnostics.shared.event("cancel requested", id: diagnosticUpdate)
+        #endif
         state = .cancelling
         task?.cancel()
     }
@@ -161,6 +225,15 @@ nonisolated struct LibraryUpdateConnection: Sendable {
 
     func endConnectionCheck() { isCheckingConnection = false }
 
-    private func setScanProgress(_ value: ScanProgress) { scanProgress = value }
-    private func setMetadataProgress(_ value: MetadataProgress) { metadataProgress = value }
+    private func setScanProgress(_ value: ScanProgress, runID: UUID) {
+        guard executionID == runID else { return }; scanProgress = value
+    }
+    private func setMetadataProgress(_ value: MetadataProgress, runID: UUID) {
+        guard executionID == runID else { return }; metadataProgress = value
+    }
+}
+
+nonisolated private enum UpdateRecoveryFailure: LocalizedError {
+    case exhausted
+    var errorDescription: String? { "自動復旧を停止しました。保存済みの結果は保持しています。接続を確認し、手動で更新してください。" }
 }

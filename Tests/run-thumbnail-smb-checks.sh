@@ -5,8 +5,8 @@ check_dir=$(mktemp -d /private/tmp/PhotoJotThumbnailSMB.XXXXXX)
 xcrun swiftc -emit-library -emit-module -module-name SMBClient \
   -target arm64-apple-macos15.0 -module-cache-path "$check_dir/modules" \
   Tests/Fixtures/ThumbnailSMBClient.swift -emit-module-path "$check_dir/SMBClient.swiftmodule" -o "$check_dir/libSMBClient.dylib"
-xcrun swiftc -parse-as-library -D DEBUG -I "$check_dir" -L "$check_dir" -lSMBClient -Xlinker -rpath -Xlinker "$check_dir" -target arm64-apple-macos15.0 -disable-sandbox \
-  -module-cache-path "$check_dir/modules" \
+xcrun swiftc PhotoJot/SMBRecovery.swift -parse-as-library -D DEBUG -I "$check_dir" -L "$check_dir" -lSMBClient -Xlinker -rpath -Xlinker "$check_dir" -target arm64-apple-macos15.0 -disable-sandbox \
+  PhotoJot/Developer/SMBDiagnostics.swift -module-cache-path "$check_dir/modules" \
   PhotoJot/SMBConnectionSettings.swift PhotoJot/IndexModels.swift PhotoJot/MediaRepository.swift \
   PhotoJot/Metadata/LimitedExifParser.swift PhotoJot/Metadata/LimitedHEIFParser.swift \
   PhotoJot/Metadata/LimitedVideoParser.swift PhotoJot/Metadata/DisplayDateResolver.swift \

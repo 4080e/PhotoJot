@@ -10,6 +10,25 @@ struct DeveloperToolsView: View {
     }
     var body: some View {
         Form {
+            SMBRecoveryBanner()
+            Section("SMB通信診断（DEBUG）") {
+                SwiftUI.TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    let snapshot = SMBDiagnostics.shared.snapshot()
+                    let now = ProcessInfo.processInfo.systemUptime
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("進行中：\(snapshot.active.count)")
+                        ForEach(snapshot.active, id: \.id) { entry in
+                            Text("[\(entry.id.uuidString.prefix(8))] \(entry.kind) • \(now - entry.start, specifier: "%.1f")秒\n\(entry.stage)")
+                        }
+                        Divider()
+                        Text(snapshot.recent.suffix(20).joined(separator: "\n"))
+                    }
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                }
+                Text("経過時間は開始からの秒数。connectionは接続寿命です。waiting/failedはライブラリからの切断通知で、NWConnectionの全状態を表すものではありません。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section {
                 Button(update.state == .cancelling ? "中断後に更新" : "保存済みの接続先を更新") { update.requestUpdate() }
                     .disabled(update.state == .running || update.restartRequested || timelineDiagnostics.isRunning)
@@ -19,6 +38,7 @@ struct DeveloperToolsView: View {
                     Button("中断", role: .cancel) { update.cancel() }
                 }
                 if let name = update.libraryName { Text(name).foregroundStyle(.secondary) }
+                if let recovery = update.recoveryMessage { Text(recovery) }
                 if update.restartRequested { Text("中断処理の終了後に更新を再開します。") }
                 if update.state != .idle {
                     Text("対象メディア：\(update.scanProgress.media)件")

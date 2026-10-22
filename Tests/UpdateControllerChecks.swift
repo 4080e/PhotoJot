@@ -50,6 +50,37 @@ import SwiftUI
     }
 
     @MainActor static func main() async throws {
+        var attempts = 0, saved = 0
+        let recovered = LibraryUpdateController(connection: {
+            LibraryUpdateConnection(settings: SMBConnectionSettings(), password: "test")
+        }, scan: { _, _ in
+            attempts += 1
+            if attempts <= 2 { throw SMBRecoveryError.interrupted }
+            return 0
+        }, metadata: { _, _ in }, saveSuccess: { _ in saved += 1 }, retryDelay: {})
+        recovered.requestUpdate()
+        await wait { !recovered.isRunning }
+        precondition(recovered.state == .completed && attempts == 3 && saved == 1 && recovered.recoveryAttempt == 2)
+        attempts = 0
+        let exhausted = LibraryUpdateController(connection: {
+            LibraryUpdateConnection(settings: SMBConnectionSettings(), password: "test")
+        }, scan: { _, _ in attempts += 1; throw SMBRecoveryError.interrupted }, metadata: { _, _ in }, retryDelay: {})
+        exhausted.requestUpdate()
+        await wait { !exhausted.isRunning }
+        precondition(exhausted.state == .failed && attempts == 3 && exhausted.errorMessage != nil)
+        var delay: CheckedContinuation<Void, Never>?
+        attempts = 0
+        let cancelledRetry = LibraryUpdateController(connection: {
+            LibraryUpdateConnection(settings: SMBConnectionSettings(), password: "test")
+        }, scan: { _, _ in attempts += 1; throw SMBRecoveryError.interrupted }, metadata: { _, _ in }, retryDelay: {
+            await withCheckedContinuation { delay = $0 }
+        })
+        cancelledRetry.requestUpdate()
+        await wait { delay != nil }
+        cancelledRetry.cancel(); delay?.resume(); delay = nil
+        await wait { !cancelledRetry.isRunning }
+        precondition(cancelledRetry.state == .cancelled && attempts == 1)
+        print("PASS: update recovery bounded to two retries, success saved once, cancellation during retry never restarts")
         let work = Work(), controller: LibraryUpdateController
         controller = work.controller()
         controller.requestUpdate(); controller.requestUpdate()
@@ -76,6 +107,9 @@ import SwiftUI
         controller.cancel()
         controller.requestUpdate(); controller.requestUpdate()
         precondition(controller.isRunning && controller.state == .cancelling && controller.restartRequested)
+        #if DEBUG
+        precondition(SMBDiagnostics.shared.snapshot().active.contains { $0.kind == "update cancellation wait" })
+        #endif
         precondition(work.scanSnapshots.count == 2) // 終了処理の戻り前には再開しない。
         work.releaseScan()
         await wait { work.scanGate != nil }
@@ -88,6 +122,9 @@ import SwiftUI
         work.releaseMetadata()
         await wait { !controller.isRunning }
         precondition(controller.state == .cancelled && controller.errorMessage == nil)
+        #if DEBUG
+        precondition(!SMBDiagnostics.shared.snapshot().active.contains { $0.kind == "update cancellation wait" })
+        #endif
         precondition(work.scanSnapshots.count == 3)
 
         work.failScan = true

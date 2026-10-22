@@ -94,9 +94,18 @@ nonisolated final class RangeThumbnailLoader: NSObject, AVAssetResourceLoaderDel
             inFlight = true
             let read = read
             Task.detached {
+                #if DEBUG
+                let diagnostic = SMBDiagnostics.shared.begin("video range read")
+                #endif
                 let start = ProcessInfo.processInfo.systemUptime
                 let result: Result<Data, Error>
                 do { result = .success(try await read(offset, count)) } catch { result = .failure(error) }
+                #if DEBUG
+                switch result {
+                case .success: SMBDiagnostics.shared.end(diagnostic)
+                case .failure: SMBDiagnostics.shared.end(diagnostic, outcome: "error")
+                }
+                #endif
                 let elapsed = ProcessInfo.processInfo.systemUptime - start
                 self.queue.async { self.received(result, id: id, log: item.log, offset: offset, count: count, elapsed: elapsed) }
             }
@@ -147,7 +156,11 @@ nonisolated final class RangeThumbnailLoader: NSObject, AVAssetResourceLoaderDel
         }
     }
     func finish() async -> RangeThumbnailSnapshot {
-        await withCheckedContinuation { continuation in
+        #if DEBUG
+        let diagnostic = SMBDiagnostics.shared.begin("video range drain")
+        defer { SMBDiagnostics.shared.end(diagnostic) }
+        #endif
+        return await withCheckedContinuation { continuation in
             queue.async {
                 self.waiters.append(continuation); self.stopped = true
                 for id in self.order { self.cancel(id, finish: true) }

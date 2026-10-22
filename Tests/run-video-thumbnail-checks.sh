@@ -9,7 +9,7 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -module-cache-path 
   PhotoJot/Thumbnails/RangeThumbnailCore.swift PhotoJot/Thumbnails/RangeThumbnailLoader.swift \
   Tests/RangeThumbnailLoaderChecks.swift -o "$check_dir/loader"
 "$check_dir/loader"
-xcrun swiftc -parse-as-library -D DEBUG -target arm64-apple-macos15.0 -module-cache-path "$check_dir/modules" \
+xcrun swiftc -parse-as-library -D DEBUG PhotoJot/Developer/SMBDiagnostics.swift -target arm64-apple-macos15.0 -module-cache-path "$check_dir/modules" \
   PhotoJot/Thumbnails/RangeThumbnailCore.swift PhotoJot/Thumbnails/RangeThumbnailLoader.swift \
   PhotoJot/Thumbnails/VideoThumbnailGenerator.swift PhotoJot/Thumbnails/PhotoThumbnailGenerator.swift \
   PhotoJot/Thumbnails/JPEGThumbnailLocator.swift PhotoJot/Thumbnails/ThumbnailImages.swift \

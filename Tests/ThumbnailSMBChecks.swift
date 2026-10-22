@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import ImageIO
 import CoreGraphics
 import UniformTypeIdentifiers
@@ -48,6 +49,13 @@ actor MetadataFixture {
         await server.release("read:photo.jpg")
         await wait { await server.waiting("close:photo.jpg") }
         check(await access.waitingOperationCount == 2)
+        // Snapshot stays readable while SMB close holds the gate, without releasing it.
+        let diagnosticSnapshot = SMBDiagnostics.shared.snapshot()
+        check(diagnosticSnapshot.active.contains { $0.kind.hasPrefix("file close") })
+        check(diagnosticSnapshot.active.contains { $0.kind.hasPrefix("gate") && $0.stage == "acquired" })
+        check(diagnosticSnapshot.active.contains { $0.kind.hasPrefix("gate") && $0.stage == "acquire waiting" })
+        let diagnosticText = diagnosticSnapshot.recent.joined() + diagnosticSnapshot.active.map(\.kind).joined()
+        check(!diagnosticText.contains("secret") && !diagnosticText.contains("photo.jpg") && !diagnosticText.contains("metadata.jpg"))
         check(!(await server.events.contains("open:metadata.jpg")))
         check(!(await server.events.contains("list:scan/child")))
         let connection = Task { try await access.checkConnection(settings: settings, password: "new") }
@@ -137,6 +145,91 @@ actor MetadataFixture {
         await access.disconnectWhenAvailable()
         do { _ = try await access.readViewer(expired, offset: 0, count: 32); preconditionFailure("expired handle") } catch { }
         await access.closeViewer(expired)
+        check(SMBDiagnostics.shared.snapshot().active.isEmpty)
+        // Notification aborts outside the gate. A non-returning transport still owns the gate.
+        await server.configure(data as Data, blocked: ["list:scan"])
+        let interruptedScan = Task { try await access.scan(settings: settings, password: "secret", consume: { _, _ in }) }
+        await wait { await server.waiting("list:scan") }
+        let connections = TestSMBConnections.shared
+        let oldID = connections.allIDs().last!
+        let connectionCount = connections.allIDs().count
+        let disconnectCount = TestDisconnectCounter.shared.snapshot()
+        connections.notify(oldID)
+        await wait { connections.isStopped(oldID) }
+        check(SMBRecoveryStatus.shared.snapshot() != nil)
+        let recoveryCheck = Task { try await access.checkConnection(settings: settings, password: "secret") }
+        await wait { await access.waitingOperationCount == 1 }
+        check(connections.allIDs().count == connectionCount)
+        check(await server.waiting("list:scan"))
+        connections.notify(oldID) // duplicate notification cannot keep aborting the connection
+        await server.release("list:scan")
+        do { _ = try await interruptedScan.value; preconditionFailure("discard interrupted scan") } catch is SMBRecoveryError { }
+        _ = try await recoveryCheck.value
+        check(SMBRecoveryStatus.shared.snapshot() == nil)
+        check(connections.allIDs().count == connectionCount + 1)
+        check(TestDisconnectCounter.shared.snapshot() >= disconnectCount + 1)
+        // Late notification and an expired reader cannot affect the next generation.
+        let fresh = try await access.openViewer(target: target, password: "secret")
+        let freshID = connections.allIDs().last!
+        connections.notify(oldID)
+        _ = try await access.readViewer(fresh, offset: 0, count: 16)
+        check(!connections.isStopped(freshID))
+        await access.closeViewer(expired)
+        check(!connections.isStopped(freshID))
+        // Video range read interruption drains before new generation; old handles fail safely.
+        await server.configure(data as Data, blocked: ["read:photo.jpg"])
+        let interruptedRead = Task { try await access.readViewer(fresh, offset: 0, count: 16) }
+        await wait { await server.waiting("read:photo.jpg") }
+        connections.notify(freshID)
+        await wait { connections.isStopped(freshID) }
+        let readConnectionCount = connections.allIDs().count
+        let nextOpen = Task { try await access.openViewer(target: target, password: "secret") }
+        await wait { await access.waitingOperationCount == 1 }
+        check(connections.allIDs().count == readConnectionCount)
+        await server.release("read:photo.jpg")
+        do { _ = try await interruptedRead.value; preconditionFailure("interrupted read") } catch is SMBRecoveryError { }
+        let nextHandle = try await nextOpen.value
+        await access.closeViewer(fresh)
+        check(try await access.readViewer(nextHandle, offset: 0, count: 16) == (data as Data).prefix(16))
+        await access.closeViewer(nextHandle)
+        await access.disconnectWhenAvailable()
+        // Cancellation beats retry classification after the old operation really finishes.
+        await server.configure(data as Data, blocked: ["list:scan"])
+        let cancelledRecovery = Task { try await access.scan(settings: settings, password: "secret", consume: { _, _ in }) }
+        await wait { await server.waiting("list:scan") }
+        let cancelledID = connections.allIDs().last!
+        connections.notify(cancelledID)
+        await wait { connections.isStopped(cancelledID) }
+        cancelledRecovery.cancel()
+        await server.release("list:scan")
+        do { _ = try await cancelledRecovery.value; preconditionFailure("cancellation must win") } catch is CancellationError { }
+        check(SMBRecoveryStatus.shared.snapshot() == nil)
+        // Authentication and share permission failures never become automatic retry markers.
+        for code: UInt32 in [0xC000006D, 0xC0000022] {
+            await server.configure(data as Data, blocked: [])
+            await server.failLogin(code)
+            do {
+                _ = try await access.scan(settings: settings, password: "secret", consume: { _, _ in })
+                preconditionFailure("expected permission failure")
+            } catch is SMBRecoveryError { preconditionFailure("permission must not retry") }
+            catch { }
+        }
+        // A late successful response after an EPERM notification must also remain non-retryable.
+        await server.configure(data as Data, blocked: ["list:scan"])
+        await server.allowLateResult(true)
+        let deniedScan = Task { try await access.scan(settings: settings, password: "secret", consume: { _, _ in }) }
+        await wait { await server.waiting("list:scan") }
+        let deniedID = connections.allIDs().last!
+        connections.notify(deniedID, error: NWError.posix(.EPERM))
+        await wait { connections.isStopped(deniedID) }
+        await server.release("list:scan")
+        do { _ = try await deniedScan.value; preconditionFailure("denied late result") }
+        catch is SMBRecoveryError { preconditionFailure("permission notification must not retry") }
+        catch { }
+        await server.allowLateResult(false)
+        check(SMBRecoveryStatus.shared.snapshot() == nil)
+        print("PASS: authentication/access denial and permission notification with late success are not retried")
+        print("PASS: recovery abort bypasses gate, stalled transport blocks new connections, delayed notifications, stale handles, range read, cancellation")
         print("PASS: real coordinator with test SMB API: scan/thumbnail/metadata FIFO, close-before-handoff, connection check contention, cancelled queued scan, retry, no concurrent SMB calls")
     }
 }

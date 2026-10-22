@@ -40,7 +40,7 @@ nonisolated final class SMBMetadataSource: MetadataRangeSource {
             guard reads <= 4096 else { throw MetadataFailure.limit("read回数4096上限") }
             let count = min(64 * 1024, length - data.count)
             let chunk: Data
-            do { chunk = try await reader.read(offset: offset + UInt64(data.count), length: UInt32(count)) }
+            do { chunk = try await reader.diagnosticRead(offset: offset + UInt64(data.count), length: UInt32(count)) }
             catch is CancellationError { throw CancellationError() }
             catch {
                 try Task.checkCancellation()

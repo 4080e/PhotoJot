@@ -203,7 +203,7 @@ import Observation
                 if !isClosing { cancelAutomaticResume() }
                 await releaseResources()
                 if !isClosing {
-                    message = error is ViewerFailure ? "ファイルが変更されたか、表示できませんでした。timelineを更新して再度開いてください。" : "メディアを取得できませんでした。接続先を確認してください。"
+                    message = error is SMBRecoveryError ? "接続が切れました。再読み込みすると新しい接続で取得します。" : error is ViewerFailure ? "ファイルが変更されたか、表示できませんでした。timelineを更新して再度開いてください。" : "メディアを取得できませんでした。接続先を確認してください。"
                     isLoading = false
                 }
             }
@@ -224,7 +224,7 @@ import Observation
                     self.awaitingAutoplay = false
                     self.player?.play()
                 } else if item.status == .failed {
-                    await self.stop(message: "動画を再生できませんでした。接続先またはファイルを確認してください。")
+                    await self.stop(message: "動画を再生できませんでした。接続先を確認して再読み込みしてください。")
                 }
             }
         }

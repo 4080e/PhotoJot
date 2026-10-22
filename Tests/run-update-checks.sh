@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 check_dir=$(mktemp -d /private/tmp/PhotoJotUpdateChecks.XXXXXX)
-xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
+xcrun swiftc PhotoJot/SMBRecovery.swift -D DEBUG PhotoJot/Developer/SMBDiagnostics.swift -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   -module-cache-path "$check_dir/modules" \
   PhotoJot/SMBConnectionSettings.swift PhotoJot/IndexModels.swift PhotoJot/MediaRepository.swift \
   PhotoJot/Metadata/LimitedExifParser.swift PhotoJot/Metadata/LimitedHEIFParser.swift \
@@ -12,7 +12,7 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   PhotoJot/Metadata/MetadataProgress.swift PhotoJot/Update/UpdateCheckpoint.swift PhotoJot/Update/LibraryUpdateController.swift Tests/UpdateControllerChecks.swift -o "$check_dir/checks"
 "$check_dir/checks" "$check_dir/index.store"
 
-xcrun swiftc -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
+xcrun swiftc PhotoJot/SMBRecovery.swift -D DEBUG PhotoJot/Developer/SMBDiagnostics.swift -parse-as-library -target arm64-apple-macos15.0 -disable-sandbox \
   -module-cache-path "$check_dir/modules" \
   PhotoJot/SMBConnectionSettings.swift PhotoJot/IndexModels.swift PhotoJot/MediaRepository.swift \
   PhotoJot/Metadata/LimitedExifParser.swift PhotoJot/Metadata/LimitedHEIFParser.swift \
