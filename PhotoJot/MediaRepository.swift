@@ -5,6 +5,17 @@ actor MediaRepository {
     // PoCで使用した単位。1バッチにつき照合fetchとsaveを各1回実行する。
     nonisolated static let batchSize = 500
     private let container: ModelContainer
+    private var activeSettings: SMBConnectionSettings?
+
+    func setActiveSettings(_ settings: SMBConnectionSettings) { activeSettings = settings }
+
+    func connectionSettings(for library: Library) throws -> SMBConnectionSettings {
+        if let activeSettings {
+            guard activeSettings.libraryID == library.id else { throw LibraryBindingError.invalidProfile }
+            return activeSettings
+        }
+        return try JSONDecoder().decode(SMBConnectionSettings.self, from: library.connectionData)
+    }
 
     init(url: URL) throws {
         let schema = Schema([Library.self, MediaEntry.self, ScanRun.self])
@@ -38,7 +49,13 @@ actor MediaRepository {
         try context.save()
     }
 
-    private func library(settings: SMBConnectionSettings, in context: ModelContext) throws -> Library? {
+    func library(settings: SMBConnectionSettings, in context: ModelContext) throws -> Library? {
+        if let id = settings.libraryID {
+            guard let library = try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.id == id })).first else {
+                throw LibraryBindingError.invalidProfile
+            }
+            return library
+        }
         let scope = [settings.host, String(settings.port), settings.domain, settings.username,
                      settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")
         return try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.scopeKey == scope })).first
@@ -73,7 +90,7 @@ actor MediaRepository {
         let data = try JSONEncoder().encode(settings)
         let scope = [settings.host, String(settings.port), settings.domain, settings.username,
                      settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")
-        let library = try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.scopeKey == scope })).first
+        let library = try library(settings: settings, in: context)
             ?? Library(scopeKey: scope, connectionData: data, displayName: settings.share + (settings.rootPath.isEmpty ? "" : "/" + settings.rootPath))
         if library.modelContext == nil { context.insert(library) }
         let libraryID = library.id
@@ -87,6 +104,26 @@ actor MediaRepository {
         context.insert(run)
         try context.save()
         return ScanTicket(libraryID: libraryID, runID: run.id)
+    }
+
+    func migrationProfile(legacy: SMBConnectionSettings) throws -> LibraryConnectionProfile {
+        let libraries = try context().fetch(FetchDescriptor<Library>())
+        let candidates = try libraries.compactMap { library -> (UUID, SMBConnectionSettings)? in
+            let saved = try JSONDecoder().decode(SMBConnectionSettings.self, from: library.connectionData)
+            guard LibraryConnectionProfile.isLANAddress(saved.host),
+                  LibraryConnectionProfile.sameRoot(saved, legacy) else { return nil }
+            return (library.id, saved)
+        }
+        guard candidates.count == 1, let (id, home) = candidates.first else { throw LibraryBindingError.ambiguous }
+        return LibraryConnectionProfile(libraryID: id, homeHost: home.host,
+            awayHost: LibraryConnectionProfile.isLANAddress(legacy.host) ? "100.92.22.5" : legacy.host,
+            useAway: !LibraryConnectionProfile.isLANAddress(legacy.host), common: home)
+    }
+
+    func validateBinding(_ profile: LibraryConnectionProfile) throws {
+        guard let library = try library(settings: profile.settings, in: context()) else { throw LibraryBindingError.invalidProfile }
+        let original = try JSONDecoder().decode(SMBConnectionSettings.self, from: library.connectionData)
+        guard LibraryConnectionProfile.sameRoot(original, profile.common) else { throw LibraryBindingError.changedRoot }
     }
 
     private func run(_ ticket: ScanTicket, in context: ModelContext) throws -> ScanRun {
@@ -155,6 +192,17 @@ actor MediaRepository {
                 $0.libraryID == libraryID && $0.lastSeenSequence < sequence
             }))
             let previous = library.completedScanSequence
+            if activeSettings?.libraryID == libraryID {
+                let lost = try context.fetchCount(FetchDescriptor<MediaEntry>(predicate: #Predicate {
+                    $0.libraryID == libraryID && $0.lastSeenSequence >= previous && $0.lastSeenSequence < sequence
+                }))
+                let present = try context.fetchCount(FetchDescriptor<MediaEntry>(predicate: #Predicate {
+                    $0.libraryID == libraryID && $0.lastSeenSequence >= previous
+                }))
+                if lost > 0 && (lost == present || (lost >= 100 && lost * 2 >= present)) {
+                    throw LibraryBindingError.excessiveMissing
+                }
+            }
             let version = TimelinePolicy.version
             let extensions = ["jpeg", "jpg", "heic", "mov", "mp4"]
             let newlyMissing = try context.fetchCount(FetchDescriptor<MediaEntry>(predicate: #Predicate {

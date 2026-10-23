@@ -228,6 +228,104 @@ actor MetadataFixture {
         catch { }
         await server.allowLateResult(false)
         check(SMBRecoveryStatus.shared.snapshot() == nil)
+        // Manual switch rejects queued old settings and never force-releases the gate.
+        let routeAccess = SMBAccessCoordinator()
+        var routeSettings = settings
+        routeSettings.libraryID = UUID(); routeSettings.routeVersion = UUID()
+        await routeAccess.configureRoute(routeSettings.routeVersion)
+        await server.configure(data as Data, blocked: ["list:scan"])
+        let routeScan = Task { try await routeAccess.scan(settings: routeSettings, password: "secret", consume: { _, _ in }) }
+        await wait { await server.waiting("list:scan") }
+        let routeOldID = connections.allIDs().last!
+        let queuedOld = Task { try await routeAccess.checkConnection(settings: routeSettings, password: "secret") }
+        await wait { await routeAccess.waitingOperationCount == 1 }
+        await routeAccess.pauseRouteRequests()
+        await routeAccess.abortRoute()
+        check(connections.isStopped(routeOldID))
+        let routeCount = connections.allIDs().count
+        let routeDrain = Task { await routeAccess.disconnectWhenAvailable() }
+        await wait { await routeAccess.waitingOperationCount >= 2 }
+        check(connections.allIDs().count == routeCount)
+        await server.release("list:scan")
+        do { _ = try await routeScan.value; preconditionFailure("manual abort must fail old scan") }
+        catch is SMBRecoveryError { preconditionFailure("manual abort must not auto retry") }
+        catch { }
+        do { _ = try await queuedOld.value; preconditionFailure("stale queued settings") }
+        catch is CancellationError { }
+        await routeDrain.value
+        var newRoute = routeSettings; newRoute.host = "100.92.22.5"; newRoute.routeVersion = UUID()
+        try await routeAccess.establishRoute(settings: newRoute, password: "secret")
+        await routeAccess.resumeRouteRequests(version: newRoute.routeVersion)
+        let newRouteID = connections.allIDs().last!
+        connections.notify(routeOldID)
+        do { _ = try await routeAccess.checkConnection(settings: routeSettings, password: "secret"); preconditionFailure("late old settings") }
+        catch is CancellationError { }
+        check(!connections.isStopped(newRouteID))
+        let routeTarget = MediaThumbnailTarget(key: target.key, path: target.path, fileSize: target.fileSize,
+            fileExtension: target.fileExtension, settings: newRoute)
+        let routeHandle = try await routeAccess.openViewer(target: routeTarget, password: "secret")
+        await server.configure(data as Data, blocked: ["read:photo.jpg"])
+        let routeRead = Task { try await routeAccess.readViewer(routeHandle, offset: 0, count: 16) }
+        await wait { await server.waiting("read:photo.jpg") }
+        await routeAccess.abortRoute()
+        let videoDrain = Task { await routeAccess.disconnectWhenAvailable() }
+        await wait { await routeAccess.waitingOperationCount == 1 }
+        await server.release("read:photo.jpg")
+        do { _ = try await routeRead.value; preconditionFailure("old range read") } catch { }
+        await videoDrain.value
+        try await routeAccess.establishRoute(settings: routeSettings, password: "secret")
+        await routeAccess.resumeRouteRequests(version: routeSettings.routeVersion)
+        do { _ = try await routeAccess.readViewer(routeHandle, offset: 0, count: 16); preconditionFailure("old stream") } catch { }
+        await routeAccess.closeViewer(routeHandle)
+        await routeAccess.disconnectWhenAvailable()
+        print("PASS: manual route abort/drain, stale gate waiters and late notifications, no new connection before drain, old video reader rejected")
+        // Probe deadline aborts only the independent probe, at each transport stage.
+        let retained = SMBAccessCoordinator()
+        await server.configure(data as Data, blocked: [])
+        let retainedHandle = try await retained.openViewer(target: target, password: "secret")
+        let retainedID = connections.allIDs().last!
+        for stage in ["connect", "login", "list:scan"] {
+            await retained.pauseRouteRequests()
+            await server.configure(data as Data, blocked: [stage])
+            let operationID = UUID(), probe = SMBAccessCoordinator(probeOperationID: UUID())
+            // An operation ID from another transaction cannot start or stop this coordinator.
+            do { try await probe.checkProbe(operationID: operationID, settings: settings, password: "secret"); preconditionFailure("wrong operation") }
+            catch is CancellationError { }
+            let actualProbe = SMBAccessCoordinator(probeOperationID: operationID)
+            let pending = Task { try await actualProbe.checkProbe(operationID: operationID, settings: settings, password: "secret") }
+            await wait { await server.waiting(stage) }
+            let probeID = connections.allIDs().last!, countBeforeAbort = connections.allIDs().count
+            await actualProbe.expireProbe(operationID: UUID())
+            check(!connections.isStopped(probeID))
+            await actualProbe.expireProbe(operationID: operationID)
+            check(connections.isStopped(probeID) && !connections.isStopped(retainedID))
+            do { _ = try await retained.readViewer(retainedHandle, offset: 0, count: 16); preconditionFailure("paused old requests") }
+            catch is CancellationError { }
+            let draining = Task { await actualProbe.finishProbe(operationID: operationID) }
+            await wait { await actualProbe.waitingOperationCount == 1 }
+            check(connections.allIDs().count == countBeforeAbort)
+            if stage == "list:scan" { await server.allowLateResult(true) }
+            await server.release(stage)
+            do { try await pending.value; preconditionFailure("expired probe success") } catch { }
+            await draining.value
+            await server.allowLateResult(false)
+            do { try await actualProbe.checkProbe(operationID: operationID, settings: settings, password: "secret"); preconditionFailure("reuse expired probe") }
+            catch is CancellationError { }
+            await retained.resumeRouteRequests(version: nil)
+            check(try await retained.readViewer(retainedHandle, offset: 0, count: 16) == (data as Data).prefix(16))
+            check(!connections.isStopped(retainedID))
+        }
+        let beforeStartID = UUID(), beforeStartProbe = SMBAccessCoordinator(probeOperationID: UUID())
+        await beforeStartProbe.expireProbe(operationID: beforeStartID) // unrelated ID is a no-op
+        let expiredBeforeID = UUID(), expiredBefore = SMBAccessCoordinator(probeOperationID: expiredBeforeID)
+        let beforeCount = connections.allIDs().count
+        await expiredBefore.expireProbe(operationID: expiredBeforeID)
+        do { try await expiredBefore.checkProbe(operationID: expiredBeforeID, settings: settings, password: "secret"); preconditionFailure("connect after early expiry") }
+        catch is CancellationError { }
+        await expiredBefore.finishProbe(operationID: expiredBeforeID)
+        check(connections.allIDs().count == beforeCount)
+        await retained.closeViewer(retainedHandle); await retained.disconnectWhenAvailable()
+        print("PASS: probe expiry during connect/login/list, operation isolation, real gate drain, no post-expiry connection, old reader remains usable")
         print("PASS: authentication/access denial and permission notification with late success are not retried")
         print("PASS: recovery abort bypasses gate, stalled transport blocks new connections, delayed notifications, stale handles, range read, cancellation")
         print("PASS: real coordinator with test SMB API: scan/thumbnail/metadata FIFO, close-before-handoff, connection check contention, cancelled queued scan, retry, no concurrent SMB calls")

@@ -76,6 +76,7 @@ public final class SMBClient: @unchecked Sendable {
     public let session = Session()
     public init(host: String, port: Int) { }
     public func login(username: String, password: String, domain: String?) async throws {
+        await TestSMBServer.shared.call("login"); try session.check()
         if let code = await TestSMBServer.shared.takeLoginFailure() { throw ErrorResponse(status: code) }
     }
     public func connectShare(_ share: String) async throws { }

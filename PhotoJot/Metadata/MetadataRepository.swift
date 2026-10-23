@@ -50,9 +50,7 @@ extension MediaRepository {
 
     func selectMetadata(settings: SMBConnectionSettings, version: Int = MetadataPolicy.version) throws -> MetadataSelection {
         let context = context()
-        let scope = [settings.host, String(settings.port), settings.domain, settings.username,
-                     settings.share, settings.rootPath].map(ScannedMedia.exactKey).joined(separator: ":")
-        guard let library = try context.fetch(FetchDescriptor<Library>(predicate: #Predicate { $0.scopeKey == scope })).first else {
+        guard let library = try library(settings: settings, in: context) else {
             throw MetadataServiceError.noLibrary
         }
         let count = try context.fetchCount(pendingMetadata(libraryID: library.id, completed: library.completedScanSequence, version: version))

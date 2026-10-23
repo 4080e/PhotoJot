@@ -22,6 +22,6 @@ extension MediaRepository {
         return MediaThumbnailTarget(key: ThumbnailKey(libraryID: libraryID, mediaEntryID: id,
             generation: entry.generation, specificationVersion: VideoThumbnailPolicy.supports(entry.fileExtension) ? VideoThumbnailPolicy.version : PhotoThumbnailPolicy.version, pixelSize: PhotoThumbnailPolicy.pixels),
             path: entry.relativePath, fileSize: entry.fileSize, fileExtension: entry.fileExtension,
-            settings: try JSONDecoder().decode(SMBConnectionSettings.self, from: library.connectionData))
+            settings: try connectionSettings(for: library))
     }
 }

@@ -16,6 +16,50 @@ actor SMBAccessCoordinator {
     private var generation: Generation?
     private var activeOwner: (operation: UUID, generation: UUID)?
 
+    private let probeOperationID: UUID?
+    private var probeGenerationID: UUID?
+    private var probeStarted = false
+    private var probeExpired = false
+    #if DEBUG
+    private var probeAbortDiagnostic: UUID?
+    #endif
+
+    init(probeOperationID: UUID? = nil) { self.probeOperationID = probeOperationID }
+
+    func checkProbe(operationID: UUID, settings: SMBConnectionSettings, password: String) async throws {
+        guard probeOperationID == operationID, !probeStarted, !probeExpired else { throw CancellationError() }
+        probeStarted = true
+        _ = try await checkConnection(settings: settings, password: password)
+    }
+
+    func expireProbe(operationID: UUID) {
+        guard probeOperationID == operationID, !probeExpired else { return }
+        probeExpired = true; routeChanging = true
+        #if DEBUG
+        probeAbortDiagnostic = SMBDiagnostics.shared.begin("probe disconnect drain", parent: operationID)
+        SMBDiagnostics.shared.event("probe disconnect requested outside gate", id: operationID)
+        #endif
+        // Expiry before client creation also prevents a subsequent connect.
+        guard let current = generation, current.id == probeGenerationID else { return }
+        current.interrupted = true; current.retryAllowed = false
+        #if DEBUG
+        SMBDiagnostics.shared.event("probe expired; disconnect requested", id: current.id)
+        #endif
+        current.client.session.disconnect()
+    }
+
+    func finishProbe(operationID: UUID) async {
+        guard probeOperationID == operationID else { return }
+        await disconnectWhenAvailable()
+        #if DEBUG
+        if let id = probeAbortDiagnostic {
+            SMBDiagnostics.shared.end(id, outcome: "probe I/O and gate cleanup finished")
+            probeAbortDiagnostic = nil
+        }
+        SMBDiagnostics.shared.event("probe gate drained", id: operationID)
+        #endif
+    }
+
     // The callback carries only its generation ID. Never wait for the gate to abort I/O.
     private func connectionInterrupted(_ id: UUID, retryAllowed: Bool) {
         guard let current = generation, current.id == id, !current.interrupted else { return }
@@ -28,6 +72,33 @@ actor SMBAccessCoordinator {
         current.client.session.disconnect()
         if activeOwner?.generation != id { disconnect() }
     }
+    private var routeChanging = false
+    private var routeVersion: UUID?
+
+    func configureRoute(_ version: UUID?) { routeVersion = version }
+    func pauseRouteRequests() { routeChanging = true }
+    func resumeRouteRequests(version: UUID?) { routeVersion = version; routeChanging = false }
+
+    // User switch: invalidate only this generation, without waiting on its operation gate.
+    func abortRoute() {
+        routeChanging = true
+        if let current = generation {
+            current.interrupted = true
+            current.retryAllowed = false
+            #if DEBUG
+            SMBDiagnostics.shared.event("manual route switch: abort old generation outside gate", id: current.id)
+            #endif
+            current.client.session.disconnect()
+        }
+    }
+
+    func establishRoute(settings: SMBConnectionSettings, password: String) async throws {
+        guard routeChanging else { throw CancellationError() }
+        try await withClient(settings: settings, password: password, switching: true) { client in
+            _ = try await client.listDirectory(path: settings.rootPath)
+        }
+    }
+
     private var client: SMBClient?
     private var connectedSettings: SMBConnectionSettings?
     private var connectedPassword: String?
@@ -54,16 +125,21 @@ actor SMBAccessCoordinator {
         defer { SMBDiagnostics.shared.end(diagnostic) }
         #endif
         // cleanupは呼び出し元Taskのcancelにも関係なく最後まで待つ。
+        let expectedGeneration = generation?.id
         let cleanup = Task {
             do { try await gate.acquire() } catch { return }
-            disconnect()
+            // A queued cleanup belongs to the generation that requested it.
+            if generation?.id == expectedGeneration { disconnect() }
             await gate.release()
         }
         await cleanup.value
     }
 
     private func withClient<T: Sendable>(settings: SMBConnectionSettings, password: String,
-                                        operationName: String = #function, operation: (SMBClient) async throws -> T) async throws -> T {
+                                        operationName: String = #function, switching: Bool = false, operation: (SMBClient) async throws -> T) async throws -> T {
+        if !switching {
+            guard !routeChanging, routeVersion == nil || settings.routeVersion == routeVersion else { throw CancellationError() }
+        }
         #if DEBUG
         let diagnostic = SMBDiagnostics.shared.begin(operationName)
         defer { SMBDiagnostics.shared.end(diagnostic) }
@@ -76,6 +152,9 @@ actor SMBAccessCoordinator {
         defer { if activeOwner?.operation == ownership { activeOwner = nil } }
         do {
             try Task.checkCancellation()
+            if !switching {
+                guard !routeChanging, routeVersion == nil || settings.routeVersion == routeVersion else { throw CancellationError() }
+            }
             if generation?.interrupted == true { disconnect() }
             if connectedSettings != settings || connectedPassword != password { disconnect() }
             if client == nil {
@@ -83,6 +162,7 @@ actor SMBAccessCoordinator {
                 let next = SMBClient(host: settings.host, port: settings.port)
                 let created = Generation(next)
                 generation = created; used = created
+                if probeOperationID != nil { probeGenerationID = created.id }
                 activeOwner = (ownership, created.id)
                 let connectionID = created.id
                 next.onDisconnected = { [weak self] error in
@@ -90,7 +170,10 @@ actor SMBAccessCoordinator {
                     Task { await self?.connectionInterrupted(connectionID, retryAllowed: retryAllowed) }
                 }
                 #if DEBUG
-                SMBDiagnostics.shared.begin("connection", id: connectionID)
+                SMBDiagnostics.shared.begin("connection", id: connectionID, parent: probeOperationID)
+                if let probeOperationID {
+                    SMBDiagnostics.shared.event("probe generation operation=\(probeOperationID.uuidString.prefix(8))", id: connectionID)
+                }
                 SMBDiagnostics.shared.event("connect waiting", id: connectionID)
                 #endif
                 client = next
@@ -211,11 +294,13 @@ actor SMBAccessCoordinator {
     }
 
     func readViewer(_ id: UUID, offset: UInt64, count: Int) async throws -> Data {
+        guard !routeChanging else { throw CancellationError() }
         #if DEBUG
         let diagnostic = SMBDiagnostics.shared.begin("viewer read")
         defer { SMBDiagnostics.shared.end(diagnostic) }
         #endif
         try await gate.acquire()
+        guard !routeChanging else { await gate.release(); throw CancellationError() }
         let owner = viewerReaders[id]?.2
         let ownership = UUID()
         if let owner { activeOwner = (ownership, owner.id) }

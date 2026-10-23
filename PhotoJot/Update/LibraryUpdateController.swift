@@ -215,6 +215,15 @@ nonisolated struct LibraryUpdateConnection: Sendable {
         if deferredUpdateRequested || savedUpdatePending { requestUpdate() }
     }
 
+    // Probe does not cancel the running operation. It prevents a retry or a queued
+    // update from starting against the old route while the switch is being checked.
+    func beginConnectionProbe() {
+        isCheckingConnection = true
+        savedUpdatePending = false
+        restartRequested = false
+        deferredUpdateRequested = false
+    }
+
     // 保存操作中だけ更新開始を抑止。古い接続設定のTaskが終了してから接続確認する。
     func beginConnectionCheck() async {
         isCheckingConnection = true

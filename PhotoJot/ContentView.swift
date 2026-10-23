@@ -11,7 +11,7 @@ struct ContentView: View {
         NavigationStack {
             if let settings = connection.savedSettings {
                 TimelineView(repository: timelineRepository, settings: settings, update: update, thumbnails: thumbnails)
-                    .id(settings)
+                    .id(settings.libraryID)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button("設定", systemImage: "gearshape") {
