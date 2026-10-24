@@ -83,6 +83,17 @@ private func check(_ value: Bool, _ label: String) { precondition(value, label) 
         check(items.map(\.sortKey) == items.map(\.sortKey).sorted(by: >), "newest first and tie break descending")
         check(items.suffix(2).allSatisfy { $0.date.kind == .unknown }, "unknown tail")
         check(Set(items.map(\.mediaType)) == ["photo", "video"], "mixed media")
+        let days = Set(items.compactMap { $0.date.groupKey?.day }).sorted()
+        for day in days {
+            let targets = try await timeline.dateTargets(libraryID: libraryID, day: day)
+            let month = String(day.prefix(7))
+            let previousMonth = days.filter { String($0.prefix(7)) < month }.last
+            let nextMonth = days.filter { String($0.prefix(7)) > month }.first
+            check(targets[.previousDay]?.date.groupKey?.day == days.last(where: { $0 < day }), "previous existing day")
+            check(targets[.nextDay]?.date.groupKey?.day == days.first(where: { $0 > day }), "next existing day")
+            check(targets[.previousMonth]?.date.groupKey?.day == previousMonth, "previous month newest day")
+            check(targets[.nextMonth]?.date.groupKey?.day == nextMonth, "next month oldest day")
+        }
         func item(_ path: String) -> TimelineItem { items.first { $0.relativePath == path }! }
         for path in ["floating.jpg", "positive.heic", "negative.jpg", "quicktime.mov"] {
             check(item(path).date.calendarDateTime == "2026-01-01T23:30:00", "original wall clock \(path)")

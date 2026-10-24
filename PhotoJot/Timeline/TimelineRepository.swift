@@ -82,6 +82,10 @@ actor TimelineRepository {
         try await store.timelinePage(libraryID: libraryID, after: cursor, newer: true)
     }
 
+    func dateTargets(libraryID: UUID, day: String) async throws -> [TimelineDateMove: TimelineItem] {
+        try await store.timelineDateTargets(libraryID: libraryID, day: day)
+    }
+
     func rotations(libraryID: UUID, ids: [UUID]) async throws -> [UUID: Int] {
         try await store.timelineRotations(libraryID: libraryID, ids: ids)
     }
@@ -210,6 +214,31 @@ extension MediaRepository {
             $0.libraryID == libraryID && $0.lastSeenSequence >= completed
                 && $0.timelineKeyVersion == version && $0.timelineSortKey != "" && extensions.contains($0.fileExtension)
         }
+    }
+
+    func timelineDateTargets(libraryID: UUID, day: String) throws -> [TimelineDateMove: TimelineItem] {
+        try Task.checkCancellation()
+        let context = context()
+        let library = try timelineLibrary(libraryID, context: context)
+        guard library.timelinePreparedVersion == TimelinePolicy.version else { throw TimelineError.needsPreparation }
+        let present = presentTimeline(library)
+        var targets: [TimelineDateMove: TimelineItem] = [:]
+        for move in TimelineDateMove.allCases {
+            let previous = move == .previousDay || move == .previousMonth
+            let prefix = "1" + (move == .previousMonth || move == .nextMonth ? String(day.prefix(7)) : day)
+            // ~は日時文字列の後。翌方向では同じ日／月の全項目を除外する。
+            let boundary = previous ? prefix : prefix + "~"
+            var fetch = FetchDescriptor<MediaEntry>(predicate: #Predicate {
+                present.evaluate($0) && $0.timelineSortKey > "1"
+                    && (previous ? $0.timelineSortKey < boundary : $0.timelineSortKey > boundary)
+            }, sortBy: [SortDescriptor(\MediaEntry.timelineSortKey, comparator: .lexical,
+                                      order: previous ? .reverse : .forward)])
+            fetch.fetchLimit = 1
+            if let entry = try context.fetch(fetch).first {
+                targets[move] = timelineItem(entry, completed: library.completedScanSequence)
+            }
+        }
+        return targets
     }
 
     func timelineMonth(libraryID: UUID, before: String) throws -> TimelineMonth? {

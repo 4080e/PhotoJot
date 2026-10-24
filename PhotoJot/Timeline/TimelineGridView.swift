@@ -56,7 +56,7 @@ struct TimelineGridView: UIViewRepresentable {
         }
         private var rotationAnchor: RotationAnchor?
         private var restoringRotation = false
-        private var reportedMonth: TimelineMonth?
+        private var reportedDay: String?
         private var titleTask: Task<Void, Never>?
         init(_ parent: TimelineGridView) { self.parent = parent }
 
@@ -248,14 +248,16 @@ struct TimelineGridView: UIViewRepresentable {
         func recordViewport(_ view: UICollectionView) {
             let id = anchor(in: view)?.id
             parent.model.visibleItemID = id
-            guard let id, let month = items[id]?.date.month, month != reportedMonth else { return }
-            reportedMonth = month
+            let date = id.flatMap { items[$0]?.date }
+            let day = date?.groupKey?.day
+            guard day != reportedDay else { return }
+            reportedDay = day
             titleTask?.cancel()
             let model = parent.model
             // updateUIView内のlayoutからも呼ばれるため、表示状態の更新を次のMainActor処理へ渡す。
             titleTask = Task { @MainActor in
                 guard !Task.isCancelled else { return }
-                model.updateDisplayedMonth(month)
+                model.updateDisplayedDate(date)
             }
         }
 

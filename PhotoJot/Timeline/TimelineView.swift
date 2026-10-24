@@ -50,6 +50,13 @@ struct TimelineView: View {
                                      selectedItem = item
                                      #endif
                                  })
+                .overlay(alignment: .bottom) {
+                    dateNavigation
+                        .padding(.bottom, 12)
+                }
+                .task(id: "\(model.displayedDay ?? "")-\(model.contentVersion)") {
+                    await model.refreshDateTargets()
+                }
                 .overlay(alignment: .top) {
                     if model.isLoadingNewer { ProgressView().padding().background(.bar) }
                     else if let error = model.newerErrorMessage {
@@ -129,6 +136,39 @@ struct TimelineView: View {
         #if DEBUG
         .sheet(item: $selectedItem) { item in DeveloperMediaDetailsView(item: item, repository: repository) }
         #endif
+    }
+
+    private var dateNavigation: some View {
+        HStack {
+            dateNavigationGroup([.nextMonth, .nextDay])
+            Spacer(minLength: 16)
+            dateNavigationGroup([.previousDay, .previousMonth])
+        }
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder private func dateNavigationGroup(_ moves: [TimelineDateMove]) -> some View {
+        let buttons = HStack(spacing: 4) {
+            ForEach(moves, id: \.self) { move in
+                Button {
+                    Task { await model.jump(move) }
+                } label: {
+                    Image(systemName: move.symbol)
+                        .font(.body.weight(.semibold))
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isLoading || model.dateTargets[move] == nil)
+                .accessibilityLabel(move.title)
+            }
+        }
+        .padding(6)
+        if #available(iOS 26.0, *) {
+            buttons.glassEffect(.regular, in: Capsule())
+        } else {
+            buttons.background(.regularMaterial, in: Capsule())
+        }
     }
 
     private var metadataProgressText: String {

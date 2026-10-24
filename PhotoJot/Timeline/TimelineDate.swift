@@ -181,3 +181,25 @@ nonisolated struct TimelineViewportAnchor: Equatable {
         itemMinY - distanceFromTop - topInset
     }
 }
+
+nonisolated enum TimelineDateMove: CaseIterable, Sendable {
+    case previousMonth, previousDay, nextDay, nextMonth
+
+    var title: String {
+        switch self {
+        case .previousMonth: "前月"
+        case .previousDay: "前日"
+        case .nextDay: "翌日"
+        case .nextMonth: "翌月"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .previousMonth: "chevron.down.2"
+        case .previousDay: "chevron.down"
+        case .nextDay: "chevron.up"
+        case .nextMonth: "chevron.up.2"
+        }
+    }
+}

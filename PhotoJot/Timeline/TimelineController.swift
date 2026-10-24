@@ -13,6 +13,8 @@ nonisolated struct TimelinePageSource: Sendable {
 
     var anchorPage: @Sendable (UUID, TimelineItem) async throws -> TimelinePage = { _, _ in throw TimelineError.needsPreparation }
 
+    var dateTargets: @Sendable (UUID, String) async throws -> [TimelineDateMove: TimelineItem] = { _, _ in [:] }
+
     var rotations: @Sendable (UUID, [UUID]) async throws -> [UUID: Int] = { _, _ in [:] }
 
     static func local(repository: TimelineRepository, settings: SMBConnectionSettings) -> Self {
@@ -22,6 +24,7 @@ nonisolated struct TimelinePageSource: Sendable {
              monthPage: { try await repository.page(libraryID: $0, startingAt: $1) },
              newerPage: { try await repository.newerPage(libraryID: $0, before: $1) },
              anchorPage: { try await repository.page(libraryID: $0, around: $1) },
+             dateTargets: { try await repository.dateTargets(libraryID: $0, day: $1) },
              rotations: { try await repository.rotations(libraryID: $0, ids: $1) })
     }
 
@@ -77,6 +80,8 @@ struct TimelineScrollRequest: Equatable {
     private(set) var displayGeneration = UUID()
     private(set) var initialJumpItemID: UUID?
     private(set) var selectedMonth: TimelineMonth?
+    private(set) var displayedDay: String?
+    private(set) var dateTargets: [TimelineDateMove: TimelineItem] = [:]
     private(set) var displayedMonth: TimelineMonth?
     private(set) var isViewerWindow = false
     private(set) var scrollRequest: TimelineScrollRequest?
@@ -116,6 +121,44 @@ struct TimelineScrollRequest: Equatable {
             append(page)
             configureNewer(page, preservingViewport: true)
             scrollRequest = TimelineScrollRequest(mediaID: item.id, keepVisiblePosition: false)
+        } catch is CancellationError { }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    func updateDisplayedDate(_ date: TimelineDate?) {
+        let day = date?.groupKey?.day
+        if displayedDay != day {
+            dateTargets = [:]
+            displayedDay = day
+        }
+        updateDisplayedMonth(date?.month)
+    }
+
+    func refreshDateTargets() async {
+        guard let libraryID, let day = displayedDay else { return }
+        do {
+            let targets = try await source.dateTargets(libraryID, day)
+            try Task.checkCancellation()
+            guard displayedDay == day else { return }
+            dateTargets = targets
+        } catch is CancellationError { }
+        catch { dateTargets = [:] }
+    }
+
+    func jump(_ move: TimelineDateMove) async {
+        guard !isLoading, let item = dateTargets[move], let libraryID else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let page = try await source.anchorPage(libraryID, item)
+            try Task.checkCancellation()
+            reset()
+            selectedMonth = item.date.month
+            errorMessage = nil
+            append(page)
+            configureNewer(page)
+            initialJumpItemID = item.id
+            updateDisplayedDate(item.date)
         } catch is CancellationError { }
         catch { errorMessage = error.localizedDescription }
     }
